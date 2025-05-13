@@ -18,6 +18,11 @@ variable "storage_account_id" {
   type        = string
 }
 
+variable "storage_account_name" {
+  description = "The name of the storage account for Synapse"
+  type        = string
+}
+
 variable "sql_admin_username" {
   description = "SQL admin username for Synapse"
   type        = string

@@ -51,6 +51,7 @@ resource "azurerm_api_management_product" "analytics" {
   resource_group_name   = var.resource_group_name
   display_name          = "Analytics APIs"
   subscription_required = true
+  subscriptions_limit   = 1
   approval_required     = true
   published             = true
 }
@@ -79,11 +80,10 @@ resource "azurerm_api_management_product_api" "product_analytics" {
 
 # Create a subscription for consuming APIs
 resource "azurerm_api_management_subscription" "subscription" {
-  name                = "lotus-subscription"
+  display_name        = "Lotus Analytics Subscription"
   api_management_name = azurerm_api_management.apim.name
   resource_group_name = var.resource_group_name
   product_id          = azurerm_api_management_product.analytics.id
-  display_name        = "Lotus Analytics Subscription"
   state               = "active"
 }
 

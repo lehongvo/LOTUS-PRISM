@@ -9,13 +9,7 @@ terraform {
       version = "~> 2.0"
     }
   }
-  backend "azurerm" {
-    # These values must be configured through backend-config
-    # resource_group_name  = "terraform-state-rg"
-    # storage_account_name = "lotusterraformstate"
-    # container_name       = "tfstate"
-    # key                  = "lotus-prism.tfstate"
-  }
+  # The backend block is moved to environment-specific configurations
   required_version = ">= 1.0.0"
 }
 
@@ -27,6 +21,4 @@ provider "azurerm" {
   }
 }
 
-provider "azuread" {
-  # Configuration options
-} 
+# The empty azuread provider block has been removed as it's already defined in required_providers 

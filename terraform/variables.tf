@@ -5,24 +5,25 @@ variable "project_name" {
 }
 
 variable "environment" {
-  description = "The environment (dev, prod)"
+  description = "Environment name (dev/prod)"
   type        = string
   default     = "dev"
 }
 
 variable "location" {
-  description = "The Azure region to deploy resources"
+  description = "Azure region for resources"
   type        = string
-  default     = "East Asia"
+  default     = "eastasia"
 }
 
 variable "tags" {
   description = "Tags to apply to all resources"
   type        = map(string)
   default = {
-    Project     = "LOTUS-PRISM"
-    Environment = "Development"
-    Creator     = "Terraform"
+    "Project"     = "LOTUS-PRISM"
+    "Environment" = "Development"
+    "Owner"       = "Data Engineering Team"
+    "Creator"     = "Terraform"
   }
 }
 
@@ -54,34 +55,33 @@ variable "storage_account_replication_type" {
 
 # Databricks
 variable "databricks_sku" {
-  description = "SKU for the Databricks workspace"
+  description = "SKU for Databricks workspace"
   type        = string
   default     = "standard"
 }
 
 # Synapse
 variable "synapse_sql_admin_username" {
-  description = "SQL admin username for Azure Synapse"
+  description = "SQL administrator username for Synapse workspace"
   type        = string
   default     = "sqladmin"
 }
 
 variable "synapse_sql_admin_password" {
-  description = "SQL admin password for Azure Synapse"
+  description = "SQL administrator password for Synapse workspace"
   type        = string
   sensitive   = true
-  default     = null
 }
 
 # Event Hubs
 variable "eventhub_sku" {
-  description = "SKU for the Event Hubs namespace"
+  description = "SKU for Event Hub Namespace"
   type        = string
   default     = "Standard"
 }
 
 variable "eventhub_capacity" {
-  description = "Throughput units for the Event Hubs namespace"
+  description = "Throughput units for Event Hub Namespace"
   type        = number
   default     = 1
 }
@@ -94,7 +94,7 @@ variable "api_management_sku" {
 }
 
 variable "api_management_capacity" {
-  description = "Capacity for API Management"
+  description = "Capacity units for API Management"
   type        = number
   default     = 1
 }
@@ -106,7 +106,6 @@ variable "publisher_name" {
 }
 
 variable "publisher_email" {
-  description = "Publisher email for API Management"
+  description = "Email address for API Management publisher"
   type        = string
-  default     = "admin@lotusretail.example"
 } 

@@ -8,7 +8,7 @@ resource "azurerm_storage_account" "storage" {
   is_hns_enabled           = true // Enable hierarchical namespace for ADLS Gen2
   
   blob_properties {
-    versioning_enabled = true
+    versioning_enabled = false
     delete_retention_policy {
       days = 7
     }

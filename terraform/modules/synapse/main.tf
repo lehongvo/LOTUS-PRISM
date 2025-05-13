@@ -2,7 +2,7 @@ resource "azurerm_synapse_workspace" "synapse" {
   name                                 = var.synapse_name
   resource_group_name                  = var.resource_group_name
   location                             = var.location
-  storage_data_lake_gen2_filesystem_id = "${var.storage_account_id}/dfs/synapse"
+  storage_data_lake_gen2_filesystem_id = "https://${var.storage_account_name}.dfs.core.windows.net/bronze"
   sql_administrator_login              = var.sql_admin_username
   sql_administrator_login_password     = var.sql_admin_password
 

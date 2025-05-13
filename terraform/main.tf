@@ -45,6 +45,7 @@ module "synapse" {
   location                   = var.location
   synapse_name               = local.synapse_name
   storage_account_id         = module.storage.storage_account_id
+  storage_account_name       = module.storage.storage_account_name
   sql_admin_username         = var.synapse_sql_admin_username
   sql_admin_password         = var.synapse_sql_admin_password
   tags                       = var.tags

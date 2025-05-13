@@ -1,0 +1,71 @@
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+crash.log
+debug.log
+.terraform.lock.hcl
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.env
+.env
+.venv
+venv/
+ENV/
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+
+# VSCode
+.vscode/
+
+# MacOS
+.DS_Store
+
+# Logs
+*.log
+
+# Environment
+.envrc
+.env.*
+
+# Data
+/data/
+*.sqlite3
+
+# Power BI
+*.pbix
+
+# Misc
+*.swp
+*~
+
+# Ignore output and plan files
+*.out
+*.plan
+*.backup
+
+# Ignore sensitive files
+secrets.*
+
+# Ignore generated API docs
+openapi.json
+swagger.json
+
+# Ignore Python test cache
+.pytest_cache/
+
+# Ignore coverage reports
+htmlcov/
+.coverage
+.coverage.*
+.cache
+
+# Ignore build artifacts
+dist/
+build/
+*.egg-info/ 
