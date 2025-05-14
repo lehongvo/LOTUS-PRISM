@@ -1,0 +1,32 @@
+[0m[1mmodule.lotus_prism.module.storage.azurerm_storage_data_lake_gen2_path.bronze_internal: Creating...[0m[0m
+[0m[1mmodule.lotus_prism.module.storage.azurerm_storage_data_lake_gen2_path.gold_product_analytics: Creating...[0m[0m
+[0m[1mmodule.lotus_prism.module.storage.azurerm_storage_data_lake_gen2_path.gold_promotion_analytics: Creating...[0m[0m
+[0m[1mmodule.lotus_prism.module.storage.azurerm_storage_data_lake_gen2_path.bronze_market_trends: Creating...[0m[0m
+[0m[1mmodule.lotus_prism.module.storage.azurerm_storage_data_lake_gen2_path.silver_categorized: Creating...[0m[0m
+[0m[1mmodule.lotus_prism.module.storage.azurerm_storage_data_lake_gen2_path.bronze_competitors: Creating...[0m[0m
+[0m[1mmodule.lotus_prism.module.storage.azurerm_storage_data_lake_gen2_path.gold_price_analytics: Creating...[0m[0m
+[0m[1mmodule.lotus_prism.module.storage.azurerm_storage_data_lake_gen2_path.silver_normalized: Creating...[0m[0m
+[0m[1mmodule.lotus_prism.module.storage.azurerm_storage_data_lake_gen2_path.gold_product_analytics: Creation complete after 5s [id=https://lotusprismdevadls.dfs.core.windows.net/gold/product_analytics][0m
+[0m[1mmodule.lotus_prism.module.storage.azurerm_storage_data_lake_gen2_path.gold_promotion_analytics: Creation complete after 5s [id=https://lotusprismdevadls.dfs.core.windows.net/gold/promotion_analytics][0m
+[0m[1mmodule.lotus_prism.module.storage.azurerm_storage_data_lake_gen2_path.bronze_internal: Creation complete after 5s [id=https://lotusprismdevadls.dfs.core.windows.net/bronze/internal][0m
+[0m[1mmodule.lotus_prism.module.storage.azurerm_storage_data_lake_gen2_path.bronze_competitors: Creation complete after 5s [id=https://lotusprismdevadls.dfs.core.windows.net/bronze/competitors][0m
+[0m[1mmodule.lotus_prism.module.storage.azurerm_storage_data_lake_gen2_path.bronze_market_trends: Creation complete after 5s [id=https://lotusprismdevadls.dfs.core.windows.net/bronze/market_trends][0m
+[0m[1mmodule.lotus_prism.module.storage.azurerm_storage_data_lake_gen2_path.silver_categorized: Creation complete after 5s [id=https://lotusprismdevadls.dfs.core.windows.net/silver/categorized][0m
+[0m[1mmodule.lotus_prism.module.storage.azurerm_storage_data_lake_gen2_path.silver_normalized: Creation complete after 5s [id=https://lotusprismdevadls.dfs.core.windows.net/silver/normalized][0m
+[0m[1mmodule.lotus_prism.module.storage.azurerm_storage_data_lake_gen2_path.gold_price_analytics: Creation complete after 6s [id=https://lotusprismdevadls.dfs.core.windows.net/gold/price_analytics][0m
+[0m[1m[32m
+Apply complete! Resources: 8 added, 0 changed, 0 destroyed.
+[0m[0m[1m[32m
+Outputs:
+
+[0madls_filesystem_bronze_name = "bronze"
+adls_filesystem_gold_name = "gold"
+adls_filesystem_silver_name = "silver"
+api_management_gateway_url = "https://lotus-prism-dev-apim.azure-api.net"
+api_management_name = "lotus-prism-dev-apim"
+databricks_workspace_url = "adb-3856051280173358.18.azuredatabricks.net"
+eventhub_namespace_name = "lotus-prism-dev-eventhub"
+resource_group_name = "lotus-prism-dev-rg"
+storage_account_name = "lotusprismdevadls"
+synapse_sql_endpoint = "lotus-prism-dev-synapse.sql.azuresynapse.net"
+synapse_workspace_id = "/subscriptions/1b88b9b2-5ed0-4b51-acaa-eb0234768133/resourceGroups/lotus-prism-dev-rg/providers/Microsoft.Synapse/workspaces/lotus-prism-dev-synapse"
