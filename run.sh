@@ -763,12 +763,278 @@ function deploy_full() {
         fi
         
         show_outputs
+
+        # Create .env file after successful deployment
+        echo -e "${YELLOW}Creating .env file with credentials...${NC}"
+        get_storage_credentials
+        if [ $? -eq 0 ]; then
+            echo -e "${GREEN}Successfully created .env file with credentials${NC}"
+        else
+            echo -e "${RED}Failed to create .env file. Please run option 9 to create it manually.${NC}"
+        fi
     else
         echo -e "${YELLOW}Configuration application cancelled.${NC}"
     fi
     
     # Restore any temporarily disabled resources
     restore_disabled_resources
+}
+
+# Get Azure Storage credentials from Azure CLI
+function get_storage_credentials() {
+    echo -e "${YELLOW}Getting Azure Storage credentials...${NC}"
+    
+    # Get resource group name from Terraform output
+    rg_name=$(cd $TF_DIR/environments/$ENV && terraform output -raw resource_group_name 2>/dev/null)
+    if [ -z "$rg_name" ]; then
+        echo -e "${RED}Failed to get resource group name from Terraform outputs${NC}"
+        return 1
+    fi
+    
+    # Get storage account name from Terraform output
+    storage_name=$(cd $TF_DIR/environments/$ENV && terraform output -raw storage_account_name 2>/dev/null)
+    if [ -z "$storage_name" ]; then
+        echo -e "${RED}Failed to get storage account name from Terraform outputs${NC}"
+        return 1
+    fi
+    
+    # Get storage account key using Azure CLI
+    echo -e "${YELLOW}Getting storage account key...${NC}"
+    storage_key=$(az storage account keys list --account-name $storage_name --resource-group $rg_name --query "[0].value" -o tsv)
+    if [ -z "$storage_key" ]; then
+        echo -e "${RED}Failed to get storage account key from Azure CLI${NC}"
+        return 1
+    fi
+    
+    # Get container name (using bronze container as default)
+    container_name="bronze"
+    
+    # Get API Management name from Terraform output
+    apim_name=$(cd $TF_DIR/environments/$ENV && terraform output -raw api_management_name 2>/dev/null)
+    if [ -z "$apim_name" ]; then
+        echo -e "${RED}Failed to get API Management name from Terraform outputs${NC}"
+        return 1
+    fi
+    
+    # Get API Management gateway URL from Terraform output
+    apim_url=$(cd $TF_DIR/environments/$ENV && terraform output -raw api_management_gateway_url 2>/dev/null)
+    if [ -z "$apim_url" ]; then
+        echo -e "${RED}Failed to get API Management gateway URL from Terraform outputs${NC}"
+        return 1
+    fi
+    
+    # Get Event Hub namespace name from Terraform output
+    eventhub_name=$(cd $TF_DIR/environments/$ENV && terraform output -raw eventhub_namespace_name 2>/dev/null)
+    if [ -z "$eventhub_name" ]; then
+        echo -e "${RED}Failed to get Event Hub namespace name from Terraform outputs${NC}"
+        return 1
+    fi
+    
+    # Backup existing .env file if it exists
+    if [ -f ".env" ]; then
+        cp .env .env.bak
+        echo -e "${YELLOW}Backed up existing .env file to .env.bak${NC}"
+        
+        # Create a temporary file
+        temp_file=$(mktemp)
+        
+        # Read the existing .env file and update/create variables
+        while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+                AZURE_STORAGE_ACCOUNT_NAME=*)
+                    echo "AZURE_STORAGE_ACCOUNT_NAME=$storage_name" >> "$temp_file"
+                    ;;
+                AZURE_STORAGE_ACCOUNT_KEY=*)
+                    echo "AZURE_STORAGE_ACCOUNT_KEY=$storage_key" >> "$temp_file"
+                    ;;
+                AZURE_STORAGE_CONTAINER=*)
+                    echo "AZURE_STORAGE_CONTAINER=$container_name" >> "$temp_file"
+                    ;;
+                API_BASE_URL=*)
+                    echo "API_BASE_URL=$apim_url" >> "$temp_file"
+                    ;;
+                PROXY_API_URL=*)
+                    echo "PROXY_API_URL=$apim_url" >> "$temp_file"
+                    ;;
+                MARKET_TRENDS_API_URL=*)
+                    echo "MARKET_TRENDS_API_URL=$apim_url" >> "$temp_file"
+                    ;;
+                *)
+                    echo "$line" >> "$temp_file"
+                    ;;
+            esac
+        done < .env
+        
+        # Add new variables if they don't exist
+        if ! grep -q "^API_KEY=" "$temp_file"; then
+            echo "API_KEY=your_api_key_here" >> "$temp_file"
+        fi
+        if ! grep -q "^PROXY_API_KEY=" "$temp_file"; then
+            echo "PROXY_API_KEY=your_api_key_here" >> "$temp_file"
+        fi
+        if ! grep -q "^PROXY_CHECK_INTERVAL=" "$temp_file"; then
+            echo "PROXY_CHECK_INTERVAL=300" >> "$temp_file"
+        fi
+        if ! grep -q "^MARKET_TRENDS_API_KEY=" "$temp_file"; then
+            echo "MARKET_TRENDS_API_KEY=your_api_key_here" >> "$temp_file"
+        fi
+        if ! grep -q "^MARKET_TRENDS_UPDATE_INTERVAL=" "$temp_file"; then
+            echo "MARKET_TRENDS_UPDATE_INTERVAL=3600" >> "$temp_file"
+        fi
+        
+        # Replace the original file with the temporary file
+        mv "$temp_file" .env
+    else
+        # Create new .env file with all configurations
+        cat > .env << EOF
+# Azure Storage Configuration
+AZURE_STORAGE_ACCOUNT_NAME=$storage_name
+AZURE_STORAGE_ACCOUNT_KEY=$storage_key
+AZURE_STORAGE_CONTAINER=$container_name
+
+# API Configuration
+API_BASE_URL=$apim_url
+API_KEY=your_api_key_here
+
+# Proxy Configuration
+PROXY_API_URL=$apim_url
+PROXY_API_KEY=your_api_key_here
+PROXY_CHECK_INTERVAL=300
+
+# Market Trends Configuration
+MARKET_TRENDS_API_URL=$apim_url
+MARKET_TRENDS_API_KEY=your_api_key_here
+MARKET_TRENDS_UPDATE_INTERVAL=3600
+
+# Other configurations
+SCRAPER_TIMEOUT=30
+SCRAPER_RETRY_COUNT=3
+SCRAPER_RETRY_DELAY=5
+LOG_LEVEL=INFO
+LOG_FILE=scraper.log
+EOF
+    fi
+    
+    echo -e "${GREEN}Azure credentials updated in .env file${NC}"
+    
+    # Check if API keys need to be set
+    if grep -q "^API_KEY=your_api_key_here" .env || grep -q "^PROXY_API_KEY=your_api_key_here" .env || grep -q "^MARKET_TRENDS_API_KEY=your_api_key_here" .env; then
+        echo -e "${YELLOW}Note: You need to manually add your API keys to the .env file${NC}"
+        echo -e "${YELLOW}You can get the API keys from Azure Portal:${NC}"
+        echo -e "${YELLOW}1. Go to API Management service: $apim_name${NC}"
+        echo -e "${YELLOW}2. Go to Subscriptions${NC}"
+        echo -e "${YELLOW}3. Copy the primary key and update the following in .env file:${NC}"
+        echo -e "${YELLOW}   - API_KEY${NC}"
+        echo -e "${YELLOW}   - PROXY_API_KEY${NC}"
+        echo -e "${YELLOW}   - MARKET_TRENDS_API_KEY${NC}"
+    fi
+    return 0
+}
+
+# Run scraper
+function run_scraper() {
+    echo -e "${YELLOW}Running scraper...${NC}"
+    
+    # Get Azure Storage credentials
+    get_storage_credentials
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Failed to get Azure Storage credentials. Please make sure Terraform is deployed first.${NC}"
+        return 1
+    fi
+    
+    # Check if virtual environment exists
+    if [ ! -d "venv" ]; then
+        echo -e "${YELLOW}Creating virtual environment...${NC}"
+        python3 -m venv venv
+    fi
+    
+    # Activate virtual environment
+    echo -e "${YELLOW}Activating virtual environment...${NC}"
+    source venv/bin/activate
+    
+    # Install requirements if needed
+    if [ ! -f "venv/.requirements_installed" ]; then
+        echo -e "${YELLOW}Installing requirements...${NC}"
+        pip install -r requirements.txt
+        touch venv/.requirements_installed
+    fi
+    
+    # Run AEON scraper
+    echo -e "${YELLOW}Running AEON scraper...${NC}"
+    python src/run_aeon_scraper.py
+    python src/run_aeon_trending_scraper.py
+    
+    # Deactivate virtual environment
+    deactivate
+    
+    echo -e "${GREEN}Scraper completed!${NC}"
+    echo
+}
+
+# Check deployment status
+function check_deployment_status() {
+    echo -e "${YELLOW}Checking deployment status...${NC}"
+    
+    # Check if Terraform is initialized
+    if [ ! -d "$TF_DIR/environments/$ENV/.terraform" ]; then
+        echo -e "${RED}❌ Terraform is not initialized${NC}"
+        echo -e "${YELLOW}Please run option 4 to initialize Terraform${NC}"
+        return 1
+    fi
+    
+    # Check if Terraform is applied
+    if [ ! -f "$TF_DIR/environments/$ENV/terraform.tfstate" ]; then
+        echo -e "${RED}❌ Terraform is not applied${NC}"
+        echo -e "${YELLOW}Please run option 1 or 6 to deploy infrastructure${NC}"
+        return 1
+    fi
+    
+    # Check required outputs
+    echo -e "${YELLOW}Checking required resources...${NC}"
+    
+    # Check Storage Account
+    storage_name=$(cd $TF_DIR/environments/$ENV && terraform output -raw storage_account_name 2>/dev/null)
+    if [ -z "$storage_name" ]; then
+        echo -e "${RED}❌ Storage Account not found${NC}"
+    else
+        echo -e "${GREEN}✅ Storage Account: $storage_name${NC}"
+    fi
+    
+    # Check Proxy Service
+    proxy_url=$(cd $TF_DIR/environments/$ENV && terraform output -raw proxy_api_url 2>/dev/null)
+    if [ -z "$proxy_url" ]; then
+        echo -e "${RED}❌ Proxy Service not found${NC}"
+    else
+        echo -e "${GREEN}✅ Proxy Service: $proxy_url${NC}"
+    fi
+    
+    # Check Event Hub
+    eventhub_name=$(cd $TF_DIR/environments/$ENV && terraform output -raw eventhub_name 2>/dev/null)
+    if [ -z "$eventhub_name" ]; then
+        echo -e "${RED}❌ Event Hub not found${NC}"
+    else
+        echo -e "${GREEN}✅ Event Hub: $eventhub_name${NC}"
+    fi
+    
+    # Check API Management
+    apim_name=$(cd $TF_DIR/environments/$ENV && terraform output -raw apim_name 2>/dev/null)
+    if [ -z "$apim_name" ]; then
+        echo -e "${RED}❌ API Management not found${NC}"
+    else
+        echo -e "${GREEN}✅ API Management: $apim_name${NC}"
+    fi
+    
+    echo
+    echo -e "${YELLOW}Deployment Status Summary:${NC}"
+    if [ -n "$storage_name" ] && [ -n "$proxy_url" ] && [ -n "$eventhub_name" ] && [ -n "$apim_name" ]; then
+        echo -e "${GREEN}✅ All required resources are deployed${NC}"
+        echo -e "${GREEN}You can now run the scraper (option 9)${NC}"
+        return 0
+    else
+        echo -e "${RED}❌ Some required resources are missing${NC}"
+        echo -e "${YELLOW}Please complete the deployment first${NC}"
+        return 1
+    fi
 }
 
 # Main menu
@@ -786,9 +1052,11 @@ function main_menu() {
         echo "6) Apply Terraform configuration"
         echo "7) Display output information"
         echo "8) Destroy infrastructure"
+        echo "9) Run scraper"
+        echo "10) Check deployment status"
         echo "0) Exit"
         
-        read -p "Choice [0-8]: " choice
+        read -p "Choice [0-10]: " choice
         
         case $choice in
             1)
@@ -814,6 +1082,12 @@ function main_menu() {
                 ;;
             8)
                 destroy_terraform
+                ;;
+            9)
+                run_scraper
+                ;;
+            10)
+                check_deployment_status
                 ;;
             0)
                 echo -e "${GREEN}Goodbye!${NC}"
