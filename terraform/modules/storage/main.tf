@@ -21,30 +21,18 @@ resource "azurerm_storage_account" "storage" {
 resource "azurerm_storage_data_lake_gen2_filesystem" "bronze" {
   name               = "bronze"
   storage_account_id = azurerm_storage_account.storage.id
-  
-  properties = {
-    description = "Raw data from various sources"
-  }
 }
 
 # Silver Layer (Cleaned and normalized data)
 resource "azurerm_storage_data_lake_gen2_filesystem" "silver" {
   name               = "silver"
   storage_account_id = azurerm_storage_account.storage.id
-  
-  properties = {
-    description = "Cleansed and validated data"
-  }
 }
 
 # Gold Layer (Business-ready data)
 resource "azurerm_storage_data_lake_gen2_filesystem" "gold" {
   name               = "gold"
   storage_account_id = azurerm_storage_account.storage.id
-  
-  properties = {
-    description = "Business-ready data models"
-  }
 }
 
 # Create folders within each layer

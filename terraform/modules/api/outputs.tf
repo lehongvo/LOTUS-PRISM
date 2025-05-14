@@ -37,4 +37,16 @@ output "analytics_subscription_key" {
   description = "The primary key for the analytics subscription"
   value       = azurerm_api_management_subscription.subscription.primary_key
   sensitive   = true
-} 
+}
+
+#TEMP_DISABLED: output "analytics_subscription_key" {
+#TEMP_DISABLED:   description = "The primary key for the analytics subscription"
+#TEMP_DISABLED:   value       = azurerm_api_management_subscription.subscription.primary_key
+#TEMP_DISABLED:   sensitive   = true
+#TEMP_DISABLED: }
+#TEMP_DISABLED: 
+#TEMP_DISABLED: #TEMP_DISABLED: output "analytics_subscription_key" {
+#TEMP_DISABLED: #TEMP_DISABLED:   description = "The primary key for the analytics subscription"
+#TEMP_DISABLED: #TEMP_DISABLED: #TEMP_DISABLED:   value       = azurerm_api_management_subscription.subscription.primary_key
+#TEMP_DISABLED: #TEMP_DISABLED: #TEMP_DISABLED:   sensitive   = true
+#TEMP_DISABLED: #TEMP_DISABLED: #TEMP_DISABLED: } 

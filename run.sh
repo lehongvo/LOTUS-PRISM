@@ -127,8 +127,8 @@ function setup_backend() {
             az storage account create --name $storage_name --resource-group $rg_name --sku Standard_LRS --kind StorageV2 --hns true
         fi
 
-        echo -e "${YELLOW}Waiting 60 seconds for storage account to be fully ready for ADLS Gen2...${NC}"
-        sleep 60
+        echo -e "${YELLOW}Waiting 10 seconds for storage account to be fully ready for ADLS Gen2...${NC}"
+        sleep 10
 
         echo "Initializing Terraform with Azure backend..."
         (cd $TF_DIR/environments/$ENV && terraform init -reconfigure \
@@ -174,9 +174,18 @@ function tf_with_unlock() {
         lock_id=$(echo "$output" | grep -oE 'ID: *[a-z0-9\-]+' | awk '{print $2}')
         if [ -n "$lock_id" ]; then
             echo -e "${RED}Terraform state is locked (ID: $lock_id). Forcing unlock...${NC}"
-            (cd $TF_DIR/environments/$ENV && terraform force-unlock -force $lock_id)
-            echo -e "${YELLOW}Retrying: $cmd${NC}"
-            output=$(eval "$cmd" 2>&1)
+            unlock_output=$(cd $TF_DIR/environments/$ENV && terraform force-unlock -force $lock_id 2>&1)
+            if echo "$unlock_output" | grep -q 'successfully unlocked'; then
+                echo -e "${GREEN}Terraform state has been successfully unlocked!${NC}"
+                echo -e "${YELLOW}Retrying: $cmd${NC}"
+                output=$(eval "$cmd" 2>&1)
+            else
+                echo -e "${RED}Failed to unlock state. Please check manually.\n$unlock_output${NC}"
+                return 1
+            fi
+        else
+            echo -e "${RED}Could not extract lock ID. Please check the state lock manually.${NC}"
+            return 1
         fi
     fi
     echo "$output"
@@ -338,27 +347,29 @@ function import_apim_apis_if_exist() {
     apim_name="lotus-prism-${ENV}-apim"
     rg_name="lotus-prism-${ENV}-rg"
     
-    # List of APIs to check
-    apis=("price-analytics" "product-analytics" "promotion-analytics")
+    # Lấy danh sách API từ Azure trực tiếp
+    api_list=$(az apim api list --resource-group $rg_name --service-name $apim_name --query "[].name" -o tsv 2>/dev/null)
     
-    for api in "${apis[@]}"; do
-        # Get API ID from Azure, or construct it with rev=1
-        api_id=$(az apim api show --name $api --resource-group $rg_name --service-name $apim_name --query id -o tsv 2>/dev/null)
-        if [ -n "$api_id" ]; then
-            # Make sure the API ID includes ;rev=1 at the end
-            if [[ "$api_id" != *";rev=1" ]]; then
-                api_id="${api_id};rev=1"
-            fi
-            # Check if already in state
-            (cd $TF_DIR/environments/$ENV && terraform state list | grep "module.lotus_prism.module.api.azurerm_api_management_api.$api" > /dev/null 2>&1)
+    # Danh sách API trong module và tên resource tương ứng
+    # Format: "api_name:resource_name"
+    apis=("price-analytics:price_analytics" "product-analytics:product_analytics" "promotion-analytics:promotion_analytics")
+    
+    for api_pair in "${apis[@]}"; do
+        # Tách api_name và resource_name
+        api_name="${api_pair%%:*}"
+        resource_name="${api_pair##*:}"
+        
+        if echo "$api_list" | grep -q "^$api_name$"; then
+            (cd $TF_DIR/environments/$ENV && terraform state list | grep "module.lotus_prism.module.api.azurerm_api_management_api.$resource_name" > /dev/null 2>&1)
             if [ $? -ne 0 ]; then
-                echo -e "${GREEN}API $api already exists on Azure. Importing into Terraform state...${NC}"
-                tf_with_unlock "(cd $TF_DIR/environments/$ENV && terraform import \"module.lotus_prism.module.api.azurerm_api_management_api.$api\" \"$api_id\")"
+                echo -e "${GREEN}API $api_name already exists on Azure. Importing into Terraform state...${NC}"
+                api_id="/subscriptions/$AZURE_SUBSCRIPTION_ID/resourceGroups/$rg_name/providers/Microsoft.ApiManagement/service/$apim_name/apis/$api_name;rev=1"
+                tf_with_unlock "(cd $TF_DIR/environments/$ENV && terraform import module.lotus_prism.module.api.azurerm_api_management_api.$resource_name \"$api_id\")"
             else
-                echo -e "${YELLOW}API $api is already managed by Terraform, skipping import.${NC}"
+                echo -e "${YELLOW}API $api_name is already managed by Terraform, skipping import.${NC}"
             fi
         else
-            echo -e "${YELLOW}API $api does not exist, will be created if needed.${NC}"
+            echo -e "${YELLOW}API $api_name does not exist, will be created if needed.${NC}"
         fi
     done
     echo
@@ -514,9 +525,141 @@ function import_apim_product_policy_if_exists() {
     echo
 }
 
-# Manually create ADLS Gen2 filesystems with Azure CLI
+# Import API Management Product API
+function import_apim_product_api_if_exists() {
+    echo -e "${YELLOW}Checking for existing API Management Product APIs...${NC}"
+    apim_name="lotus-prism-${ENV}-apim"
+    rg_name="lotus-prism-${ENV}-rg"
+    product_id="analytics"
+    
+    # List of APIs to check
+    apis=("price-analytics" "promotion-analytics" "product-analytics")
+    
+    for api in "${apis[@]}"; do
+        api_id="/subscriptions/$AZURE_SUBSCRIPTION_ID/resourceGroups/$rg_name/providers/Microsoft.ApiManagement/service/$apim_name/products/$product_id/apis/$api"
+        tf_api_name=$(echo $api | tr '-' '_')
+        
+        (cd $TF_DIR/environments/$ENV && terraform state list | grep "module.lotus_prism.module.api.azurerm_api_management_product_api.$tf_api_name" > /dev/null 2>&1)
+        if [ $? -ne 0 ]; then
+            echo -e "${GREEN}Product API $api already exists. Importing...${NC}"
+            tf_with_unlock "(cd $TF_DIR/environments/$ENV && terraform import \"module.lotus_prism.module.api.azurerm_api_management_product_api.$tf_api_name\" \"$api_id\")"
+        else
+            echo -e "${YELLOW}Product API $api is already managed by Terraform, skipping import.${NC}"
+        fi
+    done
+    echo
+}
+
+# Import ADLS Gen2 Filesystems
+function import_adls_filesystems_if_exist() {
+    echo -e "${YELLOW}Importing ADLS Gen2 filesystems into Terraform state...${NC}"
+    storage_name="lotusprism${ENV}adls"
+    rg_name="lotus-prism-${ENV}-rg"
+    
+    filesystems=("bronze" "silver" "gold")
+    for fs in "${filesystems[@]}"; do
+        # Use the correct URL format for ADLS Gen2 filesystem
+        fs_id="https://${storage_name}.dfs.core.windows.net/${fs}"
+        
+        (cd $TF_DIR/environments/$ENV && terraform state list | grep "module.lotus_prism.module.storage.azurerm_storage_data_lake_gen2_filesystem.$fs" > /dev/null 2>&1)
+        if [ $? -ne 0 ]; then
+            echo -e "${GREEN}Filesystem $fs already exists. Importing...${NC}"
+            tf_with_unlock "(cd $TF_DIR/environments/$ENV && terraform import \"module.lotus_prism.module.storage.azurerm_storage_data_lake_gen2_filesystem.$fs\" \"$fs_id\")"
+        else
+            echo -e "${YELLOW}Filesystem $fs is already managed by Terraform, skipping import.${NC}"
+        fi
+    done
+    echo
+}
+
+# Check and handle API Management Subscription limit
+function check_and_handle_apim_subscription() {
+    echo -e "${YELLOW}Checking API Management Subscription limit...${NC}"
+    apim_name="lotus-prism-${ENV}-apim"
+    rg_name="lotus-prism-${ENV}-rg"
+    
+    # Tìm subscription resource trong tf files
+    subscription_resource=$(grep -r "azurerm_api_management_subscription" $TF_DIR/modules/api --include="*.tf" | head -1)
+    
+    if [ -n "$subscription_resource" ]; then
+        # Kiểm tra xem có lỗi subscription limit trong lần apply trước không
+        if [ -f "$TF_DIR/environments/$ENV/apply_log.txt" ] && grep -q "Subscriptions limit reached for same user" "$TF_DIR/environments/$ENV/apply_log.txt"; then
+            echo -e "${RED}Subscriptions limit reached in previous run. Temporarily disabling subscription resource...${NC}"
+            
+            # Tìm file chứa subscription resource
+            file_with_subscription=$(grep -l "azurerm_api_management_subscription" $TF_DIR/modules/api/*.tf | head -1)
+            
+            if [ -n "$file_with_subscription" ]; then
+                # Tạo backup
+                cp "$file_with_subscription" "${file_with_subscription}.bak"
+                
+                # Comment out subscription resource
+                sed -i.tmp '/resource "azurerm_api_management_subscription"/,/^}/s/^/#TEMP_DISABLED: /' "$file_with_subscription"
+                
+                echo -e "${YELLOW}Temporarily commented out subscription resource in $file_with_subscription${NC}"
+                echo -e "${YELLOW}Original file saved as ${file_with_subscription}.bak${NC}"
+                
+                # Tìm và comment các outputs liên quan đến subscription
+                output_file="$TF_DIR/modules/api/outputs.tf"
+                if [ -f "$output_file" ]; then
+                    # Tạo backup
+                    cp "$output_file" "${output_file}.bak"
+                    
+                    # Ghi lại file tạm không có outputs liên quan đến subscription
+                    awk '
+                    BEGIN { output_block = 0; skip_block = 0; }
+                    /^output.*subscription/ { output_block = 1; skip_block = 1; print "#TEMP_DISABLED: " $0; next; }
+                    /^}/ { 
+                        if (output_block) { 
+                            output_block = 0; 
+                            print "#TEMP_DISABLED: " $0; 
+                            next; 
+                        }
+                    }
+                    { if (skip_block) print "#TEMP_DISABLED: " $0; else print $0; }
+                    ' "$output_file" > "${output_file}.new"
+                    
+                    # Thay thế file cũ bằng file mới
+                    mv "${output_file}.new" "$output_file"
+                    
+                    echo -e "${YELLOW}Temporarily commented out subscription references in $output_file${NC}"
+                fi
+            fi
+        fi
+    fi
+    echo
+}
+
+# Restore temporarily disabled resources
+function restore_disabled_resources() {
+    echo -e "${YELLOW}Restoring any temporarily disabled resources...${NC}"
+    
+    # Check for any .bak files in modules/api
+    for bak_file in $TF_DIR/modules/api/*.bak; do
+        if [ -f "$bak_file" ]; then
+            original_file="${bak_file%.bak}"
+            echo -e "${GREEN}Restoring original file: $original_file${NC}"
+            mv "$bak_file" "$original_file"
+        fi
+    done
+    
+    # Remove any .tmp files
+    find $TF_DIR/modules/api -name "*.tmp" -delete
+    
+    echo
+}
+
+# Manually create ADLS Gen2 filesystems with Azure CLI then use Terraform to manage
 function manual_create_filesystems() {
     echo -e "${YELLOW}Attempting to create ADLS Gen2 filesystems using Azure CLI...${NC}"
+    create_adls_filesystems
+    # Skip import - let Terraform maintain them as new resources if needed
+    echo -e "${YELLOW}Filesystems created via Azure CLI. Terraform will maintain them.${NC}"
+}
+
+# Create ADLS Gen2 filesystems with Azure CLI
+function create_adls_filesystems() {
+    echo -e "${YELLOW}Creating ADLS Gen2 filesystems using Azure CLI...${NC}"
     storage_name="lotusprism${ENV}adls"
     rg_name="lotus-prism-${ENV}-rg"
     
@@ -527,9 +670,14 @@ function manual_create_filesystems() {
         filesystems=("bronze" "silver" "gold")
         for fs in "${filesystems[@]}"; do
             echo -e "${YELLOW}Creating filesystem $fs...${NC}"
-            az storage fs exists --name $fs --account-name $storage_name --auth-mode key --account-key "$key" > /dev/null 2>&1
-            if [ $? -ne 0 ]; then
+            existing=$(az storage fs exists --name $fs --account-name $storage_name --auth-mode key --account-key "$key" --query exists -o tsv)
+            if [ "$existing" != "true" ]; then
                 az storage fs create --name $fs --account-name $storage_name --auth-mode key --account-key "$key"
+                if [ $? -eq 0 ]; then
+                    echo -e "${GREEN}Filesystem $fs created successfully.${NC}"
+                else
+                    echo -e "${RED}Failed to create filesystem $fs.${NC}"
+                fi
             else
                 echo -e "${GREEN}Filesystem $fs already exists.${NC}"
             fi
@@ -537,17 +685,35 @@ function manual_create_filesystems() {
     else
         echo -e "${RED}Failed to get storage account key.${NC}"
     fi
+    
+    # Sleep for a moment to ensure Azure has fully registered the filesystems
+    echo -e "${YELLOW}Waiting 5 seconds for Azure to register the filesystems...${NC}"
+    sleep 5
     echo
 }
 
-# Force unlock Terraform state
+# Force unlock Terraform state if locked
 function force_unlock_state() {
     echo -e "${YELLOW}Checking for locked Terraform state...${NC}"
-    # Try to unlock the known lock ID
-    known_lock_id="893ecdf1-5e34-07b8-09e2-559ce58098f9"
-    echo -e "${YELLOW}Attempting to force-unlock state (ID: $known_lock_id)...${NC}"
-    (cd $TF_DIR/environments/$ENV && terraform force-unlock -force $known_lock_id) || true
-    echo -e "${GREEN}Terraform state unlock attempted.${NC}"
+    if [ -f "$TF_DIR/environments/$ENV/.terraform.lock.hcl" ]; then
+        # Extract lock ID using sed
+        lock_id=$(cat "$TF_DIR/environments/$ENV/.terraform.lock.hcl" | sed -n 's/.*ID: \([^"]*\).*/\1/p')
+        
+        # Only attempt to unlock if we found a lock ID
+        if [ -n "$lock_id" ]; then
+            echo -e "${YELLOW}Found lock ID: $lock_id. Attempting to unlock...${NC}"
+            terraform force-unlock -force "$lock_id"
+            if [ $? -eq 0 ]; then
+                echo -e "${GREEN}Terraform state unlocked successfully.${NC}"
+            else
+                echo -e "${YELLOW}Failed to unlock state.${NC}"
+            fi
+        else
+            echo -e "${YELLOW}No lock ID found in lock file.${NC}"
+        fi
+    else
+        echo -e "${YELLOW}No lock file found.${NC}"
+    fi
     echo
 }
 
@@ -557,30 +723,52 @@ function deploy_full() {
     setup_backend
     init_terraform
     force_unlock_state
+    
+    # Import existing resources
     import_resource_group_if_exists
     import_apim_if_exists
     import_apim_apis_if_exist
     import_apim_products_if_exist
+    import_apim_product_api_if_exists
     import_apim_product_policy_if_exists
     import_eventhub_if_exists
     import_eventhubs_if_exist
     import_eventhub_consumer_groups_if_exist
     import_eventhub_auth_rules_if_exist
     import_storage_if_exists
+    import_adls_filesystems_if_exist
+    
     import_databricks_if_exists
     import_synapse_if_exists
     import_synapse_fw_rule_if_exists
+    
+    # Handle subscription limit before planning
+    check_and_handle_apim_subscription
+    
+    # Save apply logs for subscription limit detection
     plan_terraform
     
     echo -e "${YELLOW}Do you want to apply the configuration now? (y/n)${NC}"
     read -p "Choice [y/n]: " apply_choice
     
     if [[ $apply_choice == "y" || $apply_choice == "Y" ]]; then
-        apply_terraform
+        # Capture apply output to detect subscription limits
+        apply_output=$(tf_with_unlock "(cd $TF_DIR/environments/$ENV && terraform apply tfplan || true)")
+        echo "$apply_output"
+        echo "$apply_output" > $TF_DIR/environments/$ENV/apply_log.txt
+        
+        # If apply failed, try to create filesystems manually
+        if echo "$apply_output" | grep -q "Error: creating File System"; then
+            manual_create_filesystems
+        fi
+        
         show_outputs
     else
         echo -e "${YELLOW}Configuration application cancelled.${NC}"
     fi
+    
+    # Restore any temporarily disabled resources
+    restore_disabled_resources
 }
 
 # Main menu

@@ -51,7 +51,7 @@ resource "azurerm_api_management_product" "analytics" {
   resource_group_name   = var.resource_group_name
   display_name          = "Analytics APIs"
   subscription_required = true
-  subscriptions_limit   = 1
+  subscriptions_limit   = 10
   approval_required     = true
   published             = true
 }
