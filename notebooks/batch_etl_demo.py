@@ -217,8 +217,10 @@ def process_to_bronze(df, table_name):
     # Write to bronze layer
     bronze_path = f"{config.get('delta', {}).get('bronze_layer_path')}/{table_name}"
     
-    # For demonstration, just show the data
-    print(f"Would write {bronze_df.count()} records to {bronze_path}")
+    # Actually write data to Delta format instead of just showing a message
+    print(f"Writing {bronze_df.count()} records to {bronze_path}")
+    bronze_df.write.format("delta").mode("overwrite").save(bronze_path)
+    
     bronze_df.createOrReplaceTempView(f"bronze_{table_name}")
     
     return bronze_df
@@ -265,8 +267,10 @@ def process_to_silver(bronze_df, table_name):
     # Write to silver layer
     silver_path = f"{config.get('delta', {}).get('silver_layer_path')}/{table_name}"
     
-    # For demonstration, just show the data
-    print(f"Would write {silver_df.count()} records to {silver_path}")
+    # Actually write data to Delta format instead of just showing a message
+    print(f"Writing {silver_df.count()} records to {silver_path}")
+    silver_df.write.format("delta").mode("overwrite").save(silver_path)
+    
     silver_df.createOrReplaceTempView(f"silver_{table_name}")
     
     return silver_df
@@ -307,8 +311,10 @@ def process_to_gold(silver_df, table_name):
     # Write to gold layer
     gold_path = f"{config.get('delta', {}).get('gold_layer_path')}/{table_name}"
     
-    # For demonstration, just show the data
-    print(f"Would write {gold_df.count()} records to {gold_path}")
+    # Actually write data to Delta format instead of just showing a message
+    print(f"Writing {gold_df.count()} records to {gold_path}")
+    gold_df.write.format("delta").mode("overwrite").save(gold_path)
+    
     gold_df.createOrReplaceTempView(f"gold_{table_name}")
     
     return gold_df
@@ -397,7 +403,10 @@ def generate_price_comparison():
     
     # Write to gold layer
     comparison_path = f"{config.get('delta', {}).get('gold_layer_path')}/price_comparison"
-    print(f"Would write price comparison to {comparison_path}")
+    
+    # Actually write data to Delta format instead of just showing a message
+    print(f"Writing price comparison to {comparison_path}")
+    comparison_df.write.format("delta").mode("overwrite").save(comparison_path)
     
     return comparison_df
 
