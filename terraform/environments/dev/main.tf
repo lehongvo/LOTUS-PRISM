@@ -2,7 +2,7 @@ terraform {
   backend "azurerm" {
     # These values must be configured through backend-config during terraform init
     # resource_group_name  = "terraform-state-rg"
-    # storage_account_name = "lotusterraformstate"
+    # storage_account_name = "lotusterraformstatev1"
     # container_name       = "tfstate"
     # key                  = "lotus-prism-dev.tfstate"
   }
@@ -14,7 +14,7 @@ module "lotus_prism" {
   # Project settings
   project_name = "lotus-prism"
   environment  = "dev"
-  location     = "East Asia"
+  location     = "West Europe"
   tags = {
     Project     = "LOTUS-PRISM"
     Environment = "Development"

@@ -83,8 +83,8 @@ function setup_backend() {
         echo -e "${YELLOW}Setting up Azure Storage for Terraform state...${NC}"
 
         # Input storage account name
-        read -p "Storage account name [lotusterraformstate]: " storage_name
-        storage_name=${storage_name:-lotusterraformstate}
+        read -p "Storage account name [lotusterraformstatev1]: " storage_name
+        storage_name=${storage_name:-lotusterraformstatev1}
 
         # Check if storage account exists
         existing_rg=$(az storage account list --query "[?name=='$storage_name'].resourceGroup" -o tsv)
@@ -1037,6 +1037,865 @@ function check_deployment_status() {
     fi
 }
 
+# Function to upload notebooks to Databricks
+function upload_notebooks_to_databricks() {
+    echo -e "${YELLOW}Uploading notebooks to Databricks...${NC}"
+    
+    # Get Databricks workspace URL from Terraform output
+    workspace_url=$(cd $TF_DIR/environments/$ENV && terraform output -raw databricks_workspace_url 2>/dev/null)
+    if [ -z "$workspace_url" ]; then
+        echo -e "${RED}Failed to get Databricks workspace URL from Terraform outputs${NC}"
+        return 1
+    fi
+    
+    # Add https:// to the workspace URL if not present
+    if [[ $workspace_url != https://* ]]; then
+        workspace_url="https://$workspace_url"
+    fi
+    
+    # Check if API_DATABRICK_KEY exists in .env
+    local databricks_token=""
+    if [ -f ".env" ] && grep -q "^API_DATABRICK_KEY=" ".env"; then
+        # Extract the token value from .env
+        databricks_token=$(grep "^API_DATABRICK_KEY=" ".env" | cut -d'=' -f2)
+        echo -e "${GREEN}Found Databricks token in .env file${NC}"
+    else
+        # Get Databricks token - we first need to generate a token if not exists
+        # For simplicity, we'll just prompt the user to create a token manually
+        echo -e "${YELLOW}To upload notebooks to Databricks, you need a Databricks token.${NC}"
+        echo -e "${YELLOW}Please follow these steps:${NC}"
+        echo -e "${YELLOW}1. Go to Databricks workspace: $workspace_url${NC}"
+        echo -e "${YELLOW}2. Click on your user icon in the top right corner${NC}"
+        echo -e "${YELLOW}3. Select 'User Settings'${NC}"
+        echo -e "${YELLOW}4. Go to 'Access Tokens' tab${NC}"
+        echo -e "${YELLOW}5. Click 'Generate New Token'${NC}"
+        echo -e "${YELLOW}6. Enter a comment like 'LOTUS-PRISM deployment' and set an expiration${NC}"
+        echo -e "${YELLOW}7. Copy the generated token${NC}"
+        
+        read -p "Enter your Databricks token: " databricks_token
+        
+        if [ -z "$databricks_token" ]; then
+            echo -e "${RED}No token provided. Cannot upload notebooks.${NC}"
+            return 1
+        fi
+        
+        # Add token to .env file for future use
+        if [ -f ".env" ]; then
+            # Check if the variable already exists in .env
+            if grep -q "^API_DATABRICK_KEY=" ".env"; then
+                # Update the existing value
+                sed -i.bak "s/^API_DATABRICK_KEY=.*/API_DATABRICK_KEY=$databricks_token/" ".env"
+                rm -f ".env.bak"
+            else
+                # Add new variable
+                echo "API_DATABRICK_KEY=$databricks_token" >> ".env"
+            fi
+        else
+            # Create new .env file
+            echo "API_DATABRICK_KEY=$databricks_token" >> ".env"
+        fi
+    fi
+    
+    # Create databricks CLI config file directly
+    mkdir -p ~/.databrickscfg.d
+    cat > ~/.databrickscfg << EOF
+[DEFAULT]
+host = $workspace_url
+token = $databricks_token
+EOF
+    chmod 600 ~/.databrickscfg
+    
+    echo -e "${GREEN}Databricks CLI configured successfully with workspace: $workspace_url${NC}"
+    
+    # Install Databricks CLI if not installed
+    if ! command -v databricks &> /dev/null; then
+        echo -e "${YELLOW}Installing Databricks CLI...${NC}"
+        pip install databricks-cli
+    fi
+    
+    # Create LOTUS-PRISM folder in Databricks workspace
+    echo -e "${YELLOW}Creating LOTUS-PRISM folder in Databricks workspace...${NC}"
+    databricks workspace mkdirs /LOTUS-PRISM
+    
+    # Upload batch_etl_demo.py
+    echo -e "${YELLOW}Uploading batch_etl_demo.py...${NC}"
+    upload_output=$(databricks workspace import notebooks/batch_etl_demo.py /LOTUS-PRISM/batch_etl_demo --language python --format SOURCE --overwrite 2>&1)
+    if [[ $upload_output == *"error_code"* && $upload_output != *"RESOURCE_ALREADY_EXISTS"* ]]; then
+        echo -e "${RED}Failed to upload batch_etl_demo.py: $upload_output${NC}"
+    else
+        echo -e "${GREEN}Successfully uploaded/updated batch_etl_demo.py${NC}"
+    fi
+    
+    # Upload streaming_demo.py
+    echo -e "${YELLOW}Uploading streaming_demo.py...${NC}"
+    upload_output=$(databricks workspace import notebooks/streaming_demo.py /LOTUS-PRISM/streaming_demo --language python --format SOURCE --overwrite 2>&1)
+    if [[ $upload_output == *"error_code"* && $upload_output != *"RESOURCE_ALREADY_EXISTS"* ]]; then
+        echo -e "${RED}Failed to upload streaming_demo.py: $upload_output${NC}"
+    else
+        echo -e "${GREEN}Successfully uploaded/updated streaming_demo.py${NC}"
+    fi
+    
+    echo -e "${GREEN}Notebooks uploaded successfully!${NC}"
+    echo
+    
+    # Ask if user wants to also upload configuration files
+    echo -e "${YELLOW}Do you want to upload configuration files to Databricks FileStore? (y/n)${NC}"
+    read -p "Choice [y/n]: " upload_config_choice
+    
+    if [[ $upload_config_choice == "y" || $upload_config_choice == "Y" ]]; then
+        upload_config_files_to_databricks
+    fi
+    
+    return 0
+}
+
+# Function to upload config files to Databricks FileStore
+function upload_config_files_to_databricks() {
+    echo -e "${YELLOW}Uploading configuration files to Databricks FileStore...${NC}"
+    
+    # Check if Databricks CLI is configured
+    if [ ! -f ~/.databrickscfg ]; then
+        echo -e "${RED}Databricks CLI is not configured. Please run option 11 first.${NC}"
+        return 1
+    fi
+    
+    # Create LOTUS-PRISM directory in DBFS if it doesn't exist
+    databricks fs mkdirs dbfs:/FileStore/LOTUS-PRISM/configs
+    
+    # Upload batch config
+    echo -e "${YELLOW}Uploading batch_config.yaml...${NC}"
+    upload_output=$(databricks fs cp src/config/batch_config.yaml dbfs:/FileStore/LOTUS-PRISM/configs/batch_config.yaml --overwrite 2>&1)
+    if [[ $upload_output == *"error_code"* && $upload_output != *"RESOURCE_ALREADY_EXISTS"* ]]; then
+        echo -e "${RED}Failed to upload batch_config.yaml: $upload_output${NC}"
+    else
+        echo -e "${GREEN}Successfully uploaded/updated batch_config.yaml${NC}"
+    fi
+    
+    # Upload streaming config
+    echo -e "${YELLOW}Uploading streaming_config.yaml...${NC}"
+    upload_output=$(databricks fs cp src/config/streaming_config.yaml dbfs:/FileStore/LOTUS-PRISM/configs/streaming_config.yaml --overwrite 2>&1)
+    if [[ $upload_output == *"error_code"* && $upload_output != *"RESOURCE_ALREADY_EXISTS"* ]]; then
+        echo -e "${RED}Failed to upload streaming_config.yaml: $upload_output${NC}"
+    else
+        echo -e "${GREEN}Successfully uploaded/updated streaming_config.yaml${NC}"
+    fi
+    
+    echo -e "${GREEN}Configuration files uploaded successfully!${NC}"
+    echo
+    
+    return 0
+}
+
+# Function to create Databricks clusters
+function create_databricks_clusters() {
+    echo -e "${YELLOW}Creating Databricks cluster...${NC}"
+    
+    # Check if Databricks CLI is configured
+    if [ ! -f ~/.databrickscfg ]; then
+        echo -e "${RED}Databricks CLI is not configured. Please run option 11 first.${NC}"
+        return 1
+    fi
+    
+    # Cluster name to use
+    CLUSTER_NAME="LOTUS-PRISM-Unified"
+    
+    # Path to cluster configuration file
+    CLUSTER_CONFIG_FILE="config/databricks/unified_cluster.json"
+    
+    # Check if config file exists
+    if [ ! -f "$CLUSTER_CONFIG_FILE" ]; then
+        echo -e "${RED}Cluster configuration file not found: $CLUSTER_CONFIG_FILE${NC}"
+        echo -e "${YELLOW}Please make sure the configuration files are in place.${NC}"
+        return 1
+    fi
+    
+    # Check if we already have a cluster ID saved
+    if [ -f ".lotus_cluster_id" ]; then
+        CLUSTER_ID=$(cat .lotus_cluster_id)
+        echo -e "${YELLOW}Found existing cluster ID: $CLUSTER_ID. Checking status...${NC}"
+        
+        # Check if cluster exists and its state
+        cluster_info=$(databricks clusters get --cluster-id "$CLUSTER_ID" 2>/dev/null)
+        if [ $? -eq 0 ]; then
+            cluster_state=$(echo "$cluster_info" | jq -r '.state' 2>/dev/null)
+            cluster_name=$(echo "$cluster_info" | jq -r '.cluster_name' 2>/dev/null)
+            
+            echo -e "${GREEN}Found existing cluster: $cluster_name (State: $cluster_state)${NC}"
+            
+            if [ "$cluster_state" == "TERMINATED" ]; then
+                echo -e "${YELLOW}Cluster is terminated. Starting it...${NC}"
+                databricks clusters start --cluster-id "$CLUSTER_ID"
+                echo -e "${GREEN}Cluster start initiated. It may take a few minutes to start.${NC}"
+            elif [ "$cluster_state" == "PENDING" ] || [ "$cluster_state" == "RESTARTING" ] || [ "$cluster_state" == "RESIZING" ]; then
+                echo -e "${YELLOW}Cluster is currently in $cluster_state state. Please wait for it to become RUNNING.${NC}"
+            elif [ "$cluster_state" == "RUNNING" ]; then
+                echo -e "${GREEN}Cluster is already running.${NC}"
+            else
+                echo -e "${YELLOW}Cluster is in $cluster_state state. Trying to restart it...${NC}"
+                databricks clusters restart --cluster-id "$CLUSTER_ID"
+            fi
+            
+            # Use the existing cluster ID for both batch and streaming
+            echo "$CLUSTER_ID" > .batch_cluster_id
+            echo "$CLUSTER_ID" > .streaming_cluster_id
+            
+            echo -e "${GREEN}Using existing cluster for both batch and streaming jobs.${NC}"
+            return 0
+        else
+            echo -e "${YELLOW}Saved cluster ID no longer exists. Checking if cluster with name $CLUSTER_NAME exists...${NC}"
+        fi
+    fi
+    
+    # Check if a cluster with our name already exists
+    # List all clusters and grep for the name
+    echo -e "${YELLOW}Checking for existing cluster with name $CLUSTER_NAME...${NC}"
+    existing_clusters=$(databricks clusters list)
+    existing_cluster_id=$(echo "$existing_clusters" | jq -r ".clusters[] | select(.cluster_name == \"$CLUSTER_NAME\") | .cluster_id" 2>/dev/null)
+    
+    if [ -n "$existing_cluster_id" ]; then
+        echo -e "${GREEN}Found existing cluster with name $CLUSTER_NAME and ID: $existing_cluster_id${NC}"
+        CLUSTER_ID=$existing_cluster_id
+        
+        # Check cluster state
+        cluster_info=$(databricks clusters get --cluster-id "$CLUSTER_ID")
+        cluster_state=$(echo "$cluster_info" | jq -r '.state')
+        
+        echo -e "${YELLOW}Cluster state: $cluster_state${NC}"
+        
+        if [ "$cluster_state" == "TERMINATED" ]; then
+            echo -e "${YELLOW}Cluster is terminated. Starting it...${NC}"
+            databricks clusters start --cluster-id "$CLUSTER_ID"
+            echo -e "${GREEN}Cluster start initiated. It may take a few minutes to start.${NC}"
+        elif [ "$cluster_state" == "PENDING" ] || [ "$cluster_state" == "RESTARTING" ] || [ "$cluster_state" == "RESIZING" ]; then
+            echo -e "${YELLOW}Cluster is currently in $cluster_state state. Please wait for it to become RUNNING.${NC}"
+        elif [ "$cluster_state" == "RUNNING" ]; then
+            echo -e "${GREEN}Cluster is already running.${NC}"
+        else
+            echo -e "${YELLOW}Cluster is in $cluster_state state. Trying to restart it...${NC}"
+            databricks clusters restart --cluster-id "$CLUSTER_ID"
+        fi
+        
+        # Save the cluster ID
+        echo "$CLUSTER_ID" > .lotus_cluster_id
+        echo "$CLUSTER_ID" > .batch_cluster_id
+        echo "$CLUSTER_ID" > .streaming_cluster_id
+        
+        echo -e "${GREEN}Using existing cluster for both batch and streaming jobs.${NC}"
+        return 0
+    fi
+    
+    # Create a single cluster for both batch and streaming workloads
+    echo -e "${YELLOW}Creating LOTUS-PRISM unified cluster...${NC}"
+    
+    # Create unified cluster using the config file
+    CLUSTER_ID=$(databricks clusters create --json-file "$CLUSTER_CONFIG_FILE" | jq -r '.cluster_id')
+    
+    if [ $? -ne 0 ] || [ -z "$CLUSTER_ID" ] || [ "$CLUSTER_ID" == "null" ]; then
+        echo -e "${RED}Failed to create cluster.${NC}"
+        return 1
+    else
+        echo -e "${GREEN}Cluster created with ID: $CLUSTER_ID${NC}"
+        
+        # Save cluster ID for all purposes
+        echo "$CLUSTER_ID" > .lotus_cluster_id  # Save for future runs
+        echo "$CLUSTER_ID" > .batch_cluster_id  # For batch jobs
+        echo "$CLUSTER_ID" > .streaming_cluster_id  # For streaming jobs
+        
+        # Wait for cluster to start
+        echo -e "${YELLOW}Waiting for cluster to start...${NC}"
+        echo -e "${YELLOW}This may take several minutes.${NC}"
+        
+        # Poll for cluster status
+        max_retries=10
+        retry_count=0
+        cluster_started=false
+        
+        while [ $retry_count -lt $max_retries ]; do
+            echo -e "${YELLOW}Checking cluster status (attempt $(($retry_count + 1))/$max_retries)...${NC}"
+            cluster_state=$(databricks clusters get --cluster-id "$CLUSTER_ID" | jq -r '.state')
+            
+            if [ "$cluster_state" == "RUNNING" ]; then
+                echo -e "${GREEN}Cluster is now running!${NC}"
+                cluster_started=true
+                break
+            elif [ "$cluster_state" == "ERROR" ] || [ "$cluster_state" == "UNKNOWN" ]; then
+                echo -e "${RED}Cluster is in $cluster_state state. Please check the Databricks workspace.${NC}"
+                break
+            fi
+            
+            echo -e "${YELLOW}Current state: $cluster_state. Waiting 30 seconds...${NC}"
+            retry_count=$((retry_count + 1))
+            sleep 30
+        done
+        
+        if [ "$cluster_started" != "true" ]; then
+            echo -e "${YELLOW}Cluster is not yet in RUNNING state, but the ID has been saved.${NC}"
+            echo -e "${YELLOW}You can check the cluster status in the Databricks workspace.${NC}"
+        fi
+    fi
+    
+    echo -e "${GREEN}Cluster created successfully for both batch and streaming jobs!${NC}"
+    return 0
+}
+
+# Function to submit batch ETL job to Databricks
+function submit_batch_job() {
+    echo -e "${YELLOW}Submitting batch ETL job to Databricks...${NC}"
+    
+    # Check if Databricks CLI is configured
+    if [ ! -f ~/.databrickscfg ]; then
+        echo -e "${RED}Databricks CLI is not configured. Please run option 11 first.${NC}"
+        return 1
+    fi
+    
+    # Path to batch job configuration file
+    JOB_CONFIG_FILE="config/databricks/batch_job.json"
+    
+    # Check if using existing cluster or creating new cluster per job
+    if [ -f ".lotus_cluster_id" ] || [ -f ".batch_cluster_id" ]; then
+        # Get cluster ID for job
+        CLUSTER_ID=""
+        if [ -f ".lotus_cluster_id" ]; then
+            CLUSTER_ID=$(cat .lotus_cluster_id)
+        elif [ -f ".batch_cluster_id" ]; then
+            CLUSTER_ID=$(cat .batch_cluster_id)
+        fi
+        
+        # Check if cluster exists and is running
+        cluster_info=$(databricks clusters get --cluster-id "$CLUSTER_ID" 2>/dev/null)
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}Invalid cluster ID or cluster does not exist.${NC}"
+            echo -e "${YELLOW}Using job configuration with new cluster defined in $JOB_CONFIG_FILE${NC}"
+        else
+            cluster_state=$(echo "$cluster_info" | jq -r '.state' 2>/dev/null)
+            cluster_name=$(echo "$cluster_info" | jq -r '.cluster_name' 2>/dev/null)
+            
+            echo -e "${YELLOW}Using cluster: $cluster_name (Current state: $cluster_state)${NC}"
+            
+            if [ "$cluster_state" != "RUNNING" ]; then
+                echo -e "${YELLOW}Cluster is not running. Starting cluster...${NC}"
+                databricks clusters start --cluster-id "$CLUSTER_ID"
+                
+                echo -e "${YELLOW}Waiting for cluster to start...${NC}"
+                echo -e "${YELLOW}This may take a few minutes.${NC}"
+                
+                # Poll for cluster status
+                max_retries=10
+                retry_count=0
+                
+                while [ $retry_count -lt $max_retries ]; do
+                    echo -e "${YELLOW}Checking cluster status (attempt $(($retry_count + 1))/$max_retries)...${NC}"
+                    cluster_state=$(databricks clusters get --cluster-id "$CLUSTER_ID" | jq -r '.state')
+                    
+                    if [ "$cluster_state" == "RUNNING" ]; then
+                        echo -e "${GREEN}Cluster is now running!${NC}"
+                        break
+                    elif [ "$cluster_state" == "ERROR" ] || [ "$cluster_state" == "UNKNOWN" ]; then
+                        echo -e "${RED}Cluster is in $cluster_state state. Please check the Databricks workspace.${NC}"
+                        echo -e "${YELLOW}Proceeding with job submission anyway. It will queue until the cluster is ready.${NC}"
+                        break
+                    fi
+                    
+                    echo -e "${YELLOW}Current state: $cluster_state. Waiting 30 seconds...${NC}"
+                    retry_count=$((retry_count + 1))
+                    sleep 30
+                    
+                    if [ $retry_count -eq $max_retries ]; then
+                        echo -e "${YELLOW}Cluster is still not in RUNNING state.${NC}"
+                        echo -e "${YELLOW}Proceeding with job submission anyway. It will queue until the cluster is ready.${NC}"
+                    fi
+                done
+            fi
+            
+            # Create temporary job config file with existing cluster ID
+            echo -e "${YELLOW}Using existing cluster for batch job...${NC}"
+            
+            # Check if job config file exists
+            if [ -f "$JOB_CONFIG_FILE" ]; then
+                TEMP_JOB_CONFIG=$(mktemp)
+                jq --arg cluster_id "$CLUSTER_ID" '. + {existing_cluster_id: $cluster_id} | del(.new_cluster)' "$JOB_CONFIG_FILE" > "$TEMP_JOB_CONFIG"
+                JOB_CONFIG_FILE="$TEMP_JOB_CONFIG"
+            else
+                echo -e "${RED}Job configuration file not found: $JOB_CONFIG_FILE${NC}"
+                echo -e "${YELLOW}Creating a simple job configuration...${NC}"
+                
+                TEMP_JOB_CONFIG=$(mktemp)
+                cat > "$TEMP_JOB_CONFIG" << EOF
+{
+  "run_name": "LOTUS-PRISM Batch ETL Job",
+  "existing_cluster_id": "$CLUSTER_ID",
+  "notebook_task": {
+    "notebook_path": "/LOTUS-PRISM/batch_etl_demo",
+    "base_parameters": {
+      "config_path": "dbfs:/FileStore/LOTUS-PRISM/configs/batch_config.yaml"
+    }
+  }
+}
+EOF
+                JOB_CONFIG_FILE="$TEMP_JOB_CONFIG"
+            fi
+        fi
+    else
+        # Check if job config file exists
+        if [ ! -f "$JOB_CONFIG_FILE" ]; then
+            echo -e "${RED}Job configuration file not found: $JOB_CONFIG_FILE${NC}"
+            echo -e "${YELLOW}Please create a cluster first (option 12) or provide a job configuration file.${NC}"
+            return 1
+        fi
+        
+        echo -e "${YELLOW}Using job configuration with new cluster defined in $JOB_CONFIG_FILE${NC}"
+    fi
+    
+    # Submit job using the config file
+    echo -e "${YELLOW}Submitting batch ETL job...${NC}"
+    job_id=$(databricks jobs create --json-file "$JOB_CONFIG_FILE" | jq -r '.job_id' 2>/dev/null)
+    
+    if [ -z "$job_id" ] || [ "$job_id" == "null" ]; then
+        echo -e "${RED}Failed to create batch job.${NC}"
+        return 1
+    else
+        echo -e "${GREEN}Batch job created successfully. Job ID: $job_id${NC}"
+        run_response=$(databricks jobs run-now --job-id "$job_id")
+        run_id=$(echo "$run_response" | jq -r '.run_id' 2>/dev/null)
+        echo -e "${GREEN}Batch job run initiated. Run ID: $run_id${NC}"
+        echo "$job_id" > .batch_job_id
+    fi
+    
+    # Clean up temporary files
+    if [[ "$JOB_CONFIG_FILE" == /tmp/* ]]; then
+        rm -f "$JOB_CONFIG_FILE"
+    fi
+    
+    return 0
+}
+
+# Function to submit streaming job to Databricks
+function submit_streaming_job() {
+    echo -e "${YELLOW}Submitting streaming job to Databricks...${NC}"
+    
+    # Check if Databricks CLI is configured
+    if [ ! -f ~/.databrickscfg ]; then
+        echo -e "${RED}Databricks CLI is not configured. Please run option 11 first.${NC}"
+        return 1
+    fi
+    
+    # Path to streaming job configuration file
+    JOB_CONFIG_FILE="config/databricks/streaming_job.json"
+    
+    # Check if using existing cluster or creating new cluster per job
+    if [ -f ".lotus_cluster_id" ] || [ -f ".streaming_cluster_id" ]; then
+        # Get cluster ID for job
+        CLUSTER_ID=""
+        if [ -f ".lotus_cluster_id" ]; then
+            CLUSTER_ID=$(cat .lotus_cluster_id)
+        elif [ -f ".streaming_cluster_id" ]; then
+            CLUSTER_ID=$(cat .streaming_cluster_id)
+        fi
+        
+        # Check if cluster exists and is running
+        cluster_info=$(databricks clusters get --cluster-id "$CLUSTER_ID" 2>/dev/null)
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}Invalid cluster ID or cluster does not exist.${NC}"
+            echo -e "${YELLOW}Using job configuration with new cluster defined in $JOB_CONFIG_FILE${NC}"
+        else
+            cluster_state=$(echo "$cluster_info" | jq -r '.state' 2>/dev/null)
+            cluster_name=$(echo "$cluster_info" | jq -r '.cluster_name' 2>/dev/null)
+            
+            echo -e "${YELLOW}Using cluster: $cluster_name (Current state: $cluster_state)${NC}"
+            
+            if [ "$cluster_state" != "RUNNING" ]; then
+                echo -e "${YELLOW}Cluster is not running. Starting cluster...${NC}"
+                databricks clusters start --cluster-id "$CLUSTER_ID"
+                
+                echo -e "${YELLOW}Waiting for cluster to start...${NC}"
+                echo -e "${YELLOW}This may take a few minutes.${NC}"
+                
+                # Poll for cluster status
+                max_retries=10
+                retry_count=0
+                
+                while [ $retry_count -lt $max_retries ]; do
+                    echo -e "${YELLOW}Checking cluster status (attempt $(($retry_count + 1))/$max_retries)...${NC}"
+                    cluster_state=$(databricks clusters get --cluster-id "$CLUSTER_ID" | jq -r '.state')
+                    
+                    if [ "$cluster_state" == "RUNNING" ]; then
+                        echo -e "${GREEN}Cluster is now running!${NC}"
+                        break
+                    elif [ "$cluster_state" == "ERROR" ] || [ "$cluster_state" == "UNKNOWN" ]; then
+                        echo -e "${RED}Cluster is in $cluster_state state. Please check the Databricks workspace.${NC}"
+                        echo -e "${YELLOW}Proceeding with job submission anyway. It will queue until the cluster is ready.${NC}"
+                        break
+                    fi
+                    
+                    echo -e "${YELLOW}Current state: $cluster_state. Waiting 30 seconds...${NC}"
+                    retry_count=$((retry_count + 1))
+                    sleep 30
+                    
+                    if [ $retry_count -eq $max_retries ]; then
+                        echo -e "${YELLOW}Cluster is still not in RUNNING state.${NC}"
+                        echo -e "${YELLOW}Proceeding with job submission anyway. It will queue until the cluster is ready.${NC}"
+                    fi
+                done
+            fi
+            
+            # Create temporary job config file with existing cluster ID
+            echo -e "${YELLOW}Using existing cluster for streaming job...${NC}"
+            
+            # Check if job config file exists
+            if [ -f "$JOB_CONFIG_FILE" ]; then
+                TEMP_JOB_CONFIG=$(mktemp)
+                jq --arg cluster_id "$CLUSTER_ID" '. + {existing_cluster_id: $cluster_id} | del(.new_cluster)' "$JOB_CONFIG_FILE" > "$TEMP_JOB_CONFIG"
+                JOB_CONFIG_FILE="$TEMP_JOB_CONFIG"
+            else
+                echo -e "${RED}Job configuration file not found: $JOB_CONFIG_FILE${NC}"
+                echo -e "${YELLOW}Creating a simple job configuration...${NC}"
+                
+                TEMP_JOB_CONFIG=$(mktemp)
+                cat > "$TEMP_JOB_CONFIG" << EOF
+{
+  "run_name": "LOTUS-PRISM Streaming Job",
+  "existing_cluster_id": "$CLUSTER_ID",
+  "notebook_task": {
+    "notebook_path": "/LOTUS-PRISM/streaming_demo",
+    "base_parameters": {
+      "config_path": "dbfs:/FileStore/LOTUS-PRISM/configs/streaming_config.yaml"
+    }
+  }
+}
+EOF
+                JOB_CONFIG_FILE="$TEMP_JOB_CONFIG"
+            fi
+        fi
+    else
+        # Check if job config file exists
+        if [ ! -f "$JOB_CONFIG_FILE" ]; then
+            echo -e "${RED}Job configuration file not found: $JOB_CONFIG_FILE${NC}"
+            echo -e "${YELLOW}Please create a cluster first (option 12) or provide a job configuration file.${NC}"
+            return 1
+        fi
+        
+        echo -e "${YELLOW}Using job configuration with new cluster defined in $JOB_CONFIG_FILE${NC}"
+    fi
+    
+    # Submit job using the config file
+    echo -e "${YELLOW}Submitting streaming job...${NC}"
+    job_id=$(databricks jobs create --json-file "$JOB_CONFIG_FILE" | jq -r '.job_id' 2>/dev/null)
+    
+    if [ -z "$job_id" ] || [ "$job_id" == "null" ]; then
+        echo -e "${RED}Failed to create streaming job.${NC}"
+        return 1
+    else
+        echo -e "${GREEN}Streaming job created successfully. Job ID: $job_id${NC}"
+        run_response=$(databricks jobs run-now --job-id "$job_id")
+        run_id=$(echo "$run_response" | jq -r '.run_id' 2>/dev/null)
+        echo -e "${GREEN}Streaming job run initiated. Run ID: $run_id${NC}"
+        echo "$job_id" > .streaming_job_id
+    fi
+    
+    # Clean up temporary files
+    if [[ "$JOB_CONFIG_FILE" == /tmp/* ]]; then
+        rm -f "$JOB_CONFIG_FILE"
+    fi
+    
+    return 0
+}
+
+# Function to verify Phase 3 assets
+function verify_phase3_assets() {
+    echo -e "${YELLOW}Verifying Phase 3 (Data Processing) assets...${NC}"
+    
+    # Check if configuration files exist
+    echo -e "${YELLOW}Checking configuration files...${NC}"
+    if [ -f "src/config/batch_config.yaml" ] && [ -f "src/config/streaming_config.yaml" ]; then
+        echo -e "${GREEN}✅ Configuration files found${NC}"
+    else
+        echo -e "${RED}❌ Configuration files missing${NC}"
+        echo -e "${YELLOW}Creating default configuration files...${NC}"
+        mkdir -p src/config
+        
+        # Create default batch_config.yaml if it doesn't exist
+        if [ ! -f "src/config/batch_config.yaml" ]; then
+            cat > src/config/batch_config.yaml << EOF
+# Cấu hình batch ETL cho LOTUS-PRISM
+# Delta Lake tables configuration
+delta:
+  bronze_layer_path: "abfss://bronze@lotusprismstorage.dfs.core.windows.net"
+  silver_layer_path: "abfss://silver@lotusprismstorage.dfs.core.windows.net"
+  gold_layer_path: "abfss://gold@lotusprismstorage.dfs.core.windows.net"
+
+# Data Sources
+data_sources:
+  aeon_data: "abfss://bronze@lotusprismstorage.dfs.core.windows.net/raw/aeon"
+  lotte_data: "abfss://bronze@lotusprismstorage.dfs.core.windows.net/raw/lotte"
+  mm_mega_data: "abfss://bronze@lotusprismstorage.dfs.core.windows.net/raw/mm_mega"
+  winmart_data: "abfss://bronze@lotusprismstorage.dfs.core.windows.net/raw/winmart"
+  lotus_internal_data: "abfss://bronze@lotusprismstorage.dfs.core.windows.net/raw/lotus_internal"
+  market_trend_data: "abfss://bronze@lotusprismstorage.dfs.core.windows.net/raw/market_trends"
+
+# Batch Processing Parameters
+processing:
+  write_mode: "merge"
+  partition_columns:
+    - "category"
+    - "date"
+  max_records_per_file: 1000000
+  optimize_interval: 10
+
+# Validation
+validation:
+  min_records_threshold: 1000
+  max_null_percentage: 0.05
+  price_min_threshold: 1000
+  price_max_threshold: 100000000
+  enable_schema_validation: true
+  enable_data_quality_checks: true
+  notify_on_failure: true
+
+# Spark Configuration
+spark:
+  executor_memory: "8g"
+  executor_cores: 4
+  driver_memory: "4g"
+  max_executors: 10
+  log_level: "WARN"
+EOF
+            echo -e "${GREEN}Created default batch_config.yaml${NC}"
+        fi
+        
+        # Create default streaming_config.yaml if it doesn't exist
+        if [ ! -f "src/config/streaming_config.yaml" ]; then
+            cat > src/config/streaming_config.yaml << EOF
+# Cấu hình streaming cho LOTUS-PRISM
+# Kafka/Event Hubs Configuration
+kafka:
+  bootstrap_servers: "lotus-prism-eventhub.servicebus.windows.net:9093"
+  security_protocol: "SASL_SSL"
+  sasl_mechanism: "PLAIN"
+  connection_string_key_vault: "eventhubs-connection-string"
+  topics:
+    price_changes: "price-changes"
+    inventory_updates: "inventory-updates"
+    competitor_prices: "competitor-prices"
+    promo_updates: "promo-updates"
+
+# Stream Processing Parameters
+processing:
+  trigger_interval: "10 seconds"
+  checkpoint_location: "abfss://checkpoints@lotusprismstorage.dfs.core.windows.net/streaming"
+  watermark_delay: "1 hours"
+  output_mode: "append"
+
+# Delta Lake
+delta:
+  silver_layer_path: "abfss://silver@lotusprismstorage.dfs.core.windows.net"
+  gold_layer_path: "abfss://gold@lotusprismstorage.dfs.core.windows.net"
+  optimize_interval_ms: 300000
+
+# Notifications
+notifications:
+  price_change_threshold: 0.05
+  significant_price_drop_threshold: 0.1
+  anomaly_zscore_threshold: 3.0
+
+# Spark Configuration
+spark:
+  executor_memory: "4g"
+  executor_cores: 2
+  driver_memory: "4g"
+  max_executors: 8
+  log_level: "WARN"
+EOF
+            echo -e "${GREEN}Created default streaming_config.yaml${NC}"
+        fi
+    fi
+    
+    # Check if notebooks exist
+    echo -e "${YELLOW}Checking notebooks...${NC}"
+    if [ -f "notebooks/batch_etl_demo.py" ] && [ -f "notebooks/streaming_demo.py" ]; then
+        echo -e "${GREEN}✅ Notebooks found${NC}"
+    else
+        echo -e "${RED}❌ Notebooks missing${NC}"
+        echo -e "${YELLOW}Please make sure the notebooks are in the notebooks directory${NC}"
+        return 1
+    fi
+    
+    # Check if batch processing modules exist
+    echo -e "${YELLOW}Checking batch processing modules...${NC}"
+    if [ -d "src/batch" ]; then
+        echo -e "${GREEN}✅ Batch processing modules found${NC}"
+    else
+        echo -e "${RED}❌ Batch processing modules missing${NC}"
+        echo -e "${YELLOW}Please make sure the batch processing modules are in src/batch${NC}"
+        return 1
+    fi
+    
+    # Check if streaming modules exist
+    echo -e "${YELLOW}Checking streaming modules...${NC}"
+    if [ -d "src/streaming" ]; then
+        echo -e "${GREEN}✅ Streaming modules found${NC}"
+    else
+        echo -e "${RED}❌ Streaming modules missing${NC}"
+        echo -e "${YELLOW}Creating directory structure for streaming modules...${NC}"
+        mkdir -p src/streaming
+        # Create empty __init__.py
+        if [ ! -f "src/streaming/__init__.py" ]; then
+            cat > src/streaming/__init__.py << EOF
+"""
+Module for real-time streaming data processing components.
+"""
+EOF
+            echo -e "${GREEN}Created streaming module structure${NC}"
+        fi
+    fi
+    
+    echo -e "${GREEN}Phase 3 assets verification complete${NC}"
+    return 0
+}
+
+# Function to install required Python libraries to Databricks cluster
+function install_databricks_libraries() {
+    echo -e "${YELLOW}Installing required Python libraries to Databricks cluster...${NC}"
+    
+    # Check if Databricks CLI is configured
+    if [ ! -f ~/.databrickscfg ]; then
+        echo -e "${RED}Databricks CLI is not configured. Please run option 11 first.${NC}"
+        return 1
+    fi
+    
+    # Get cluster ID
+    CLUSTER_ID=""
+    if [ -f ".lotus_cluster_id" ]; then
+        CLUSTER_ID=$(cat .lotus_cluster_id)
+    else
+        echo -e "${RED}No cluster ID found. Please create a cluster first (option 12).${NC}"
+        return 1
+    fi
+    
+    # Check if cluster exists and is running
+    cluster_info=$(databricks clusters get --cluster-id "$CLUSTER_ID" 2>/dev/null)
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Invalid cluster ID or cluster does not exist.${NC}"
+        return 1
+    else
+        cluster_state=$(echo "$cluster_info" | jq -r '.state' 2>/dev/null)
+        cluster_name=$(echo "$cluster_info" | jq -r '.cluster_name' 2>/dev/null)
+        
+        echo -e "${YELLOW}Using cluster: $cluster_name (Current state: $cluster_state)${NC}"
+        
+        if [ "$cluster_state" != "RUNNING" ]; then
+            echo -e "${YELLOW}Cluster is not running. Starting cluster...${NC}"
+            databricks clusters start --cluster-id "$CLUSTER_ID"
+            
+            echo -e "${YELLOW}Waiting for cluster to start...${NC}"
+            echo -e "${YELLOW}This may take a few minutes.${NC}"
+            
+            # Poll for cluster status
+            max_retries=10
+            retry_count=0
+            
+            while [ $retry_count -lt $max_retries ]; do
+                echo -e "${YELLOW}Checking cluster status (attempt $(($retry_count + 1))/$max_retries)...${NC}"
+                cluster_state=$(databricks clusters get --cluster-id "$CLUSTER_ID" | jq -r '.state')
+                
+                if [ "$cluster_state" == "RUNNING" ]; then
+                    echo -e "${GREEN}Cluster is now running!${NC}"
+                    break
+                elif [ "$cluster_state" == "ERROR" ] || [ "$cluster_state" == "UNKNOWN" ]; then
+                    echo -e "${RED}Cluster is in $cluster_state state. Please check the Databricks workspace.${NC}"
+                    return 1
+                fi
+                
+                echo -e "${YELLOW}Current state: $cluster_state. Waiting 30 seconds...${NC}"
+                retry_count=$((retry_count + 1))
+                sleep 30
+                
+                if [ $retry_count -eq $max_retries ]; then
+                    echo -e "${YELLOW}Cluster is still not in RUNNING state.${NC}"
+                    return 1
+                fi
+            done
+        fi
+    fi
+    
+    # Install required libraries
+    echo -e "${YELLOW}Installing PyYAML library...${NC}"
+    # Create library JSON file
+    LIBRARY_CONFIG=$(mktemp)
+    cat > "$LIBRARY_CONFIG" << EOF
+{
+  "cluster_id": "$CLUSTER_ID",
+  "libraries": [
+    {
+      "pypi": {
+        "package": "pyyaml"
+      }
+    }
+  ]
+}
+EOF
+    
+    # Install libraries
+    databricks libraries install --json-file "$LIBRARY_CONFIG"
+    
+    # Clean up
+    rm -f "$LIBRARY_CONFIG"
+    
+    echo -e "${GREEN}Libraries installed successfully. Waiting for installation to complete...${NC}"
+    sleep 30  # Wait for libraries to be installed
+    
+    return 0
+}
+
+# Function to deploy Phase 3
+function deploy_phase3() {
+    echo -e "${YELLOW}Deploying Phase 3 (Data Processing)...${NC}"
+    
+    # First, verify the Phase 3 assets
+    verify_phase3_assets
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Phase 3 assets verification failed. Please fix the issues and try again.${NC}"
+        return 1
+    fi
+    
+    # Upload notebooks to Databricks
+    upload_notebooks_to_databricks
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Failed to upload notebooks to Databricks. Phase 3 deployment incomplete.${NC}"
+        return 1
+    fi
+    
+    # Create unified Databricks cluster (or reuse existing)
+    create_databricks_clusters
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Failed to create or reuse Databricks cluster. Phase 3 deployment incomplete.${NC}"
+        return 1
+    fi
+    
+    # Install required Python libraries
+    echo -e "${YELLOW}Installing required Python libraries to Databricks cluster...${NC}"
+    install_databricks_libraries
+    if [ $? -ne 0 ]; then
+        echo -e "${YELLOW}Warning: Failed to install Python libraries. Jobs may fail if libraries are missing.${NC}"
+        echo -e "${YELLOW}You can install them manually with option 16.${NC}"
+    else
+        echo -e "${GREEN}Required Python libraries installed successfully.${NC}"
+    fi
+    
+    echo -e "${GREEN}Phase 3 deployed successfully!${NC}"
+    
+    # Ask if user wants to run jobs
+    echo -e "${YELLOW}Do you want to run the batch and streaming jobs now? (y/n)${NC}"
+    read -p "Choice [y/n]: " run_jobs_choice
+    
+    if [[ $run_jobs_choice == "y" || $run_jobs_choice == "Y" ]]; then
+        echo -e "${YELLOW}Submitting batch and streaming jobs...${NC}"
+        submit_batch_job
+        submit_streaming_job
+    fi
+    
+    return 0
+}
+
 # Main menu
 function main_menu() {
     while true; do
@@ -1054,9 +1913,18 @@ function main_menu() {
         echo "8) Destroy infrastructure"
         echo "9) Run scraper"
         echo "10) Check deployment status"
+        echo
+        echo "Phase 3 - Data Processing:"
+        echo "11) Deploy Phase 3 components"
+        echo "12) Create/Reuse Databricks cluster"
+        echo "13) Run batch ETL job"
+        echo "14) Run streaming job"
+        echo "15) Verify Phase 3 assets"
+        echo "16) Install Python libraries to cluster"
+        echo
         echo "0) Exit"
         
-        read -p "Choice [0-10]: " choice
+        read -p "Choice [0-16]: " choice
         
         case $choice in
             1)
@@ -1088,6 +1956,24 @@ function main_menu() {
                 ;;
             10)
                 check_deployment_status
+                ;;
+            11)
+                deploy_phase3
+                ;;
+            12)
+                create_databricks_clusters
+                ;;
+            13)
+                submit_batch_job
+                ;;
+            14)
+                submit_streaming_job
+                ;;
+            15)
+                verify_phase3_assets
+                ;;
+            16)
+                install_databricks_libraries
                 ;;
             0)
                 echo -e "${GREEN}Goodbye!${NC}"

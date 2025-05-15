@@ -1,0 +1,106 @@
+# Cấu hình streaming cho LOTUS-PRISM
+
+# Kết nối Event Hub
+eventhub_conn_str: "Endpoint=sb://<namespace>.servicebus.windows.net/;SharedAccessKeyName=...;SharedAccessKey=..."
+input_eventhub: "price-change-events"
+
+# Đầu ra
+output_path: abfss://silver@<storage_account>.dfs.core.windows.net/streaming/price_changes/
+
+# Ngưỡng gửi thông báo biến động giá
+notification_threshold: 0.1  # 10% thay đổi giá
+
+# Streaming Processing Configuration
+
+# Kafka/Event Hubs Configuration
+kafka:
+  bootstrap_servers: "lotus-prism-eventhub.servicebus.windows.net:9093"
+  security_protocol: "SASL_SSL"
+  sasl_mechanism: "PLAIN"
+  connection_string_key_vault: "eventhubs-connection-string"
+  topics:
+    price_changes: "price-changes"
+    inventory_updates: "inventory-updates"
+    competitor_prices: "competitor-prices"
+    promo_updates: "promo-updates"
+
+# Event Hubs (Alternative to Kafka)
+event_hubs:
+  namespace: "lotus-prism-eventhub"
+  connection_string_key_vault: "eventhubs-connection-string"
+  event_hubs:
+    price_changes: "price-changes"
+    inventory_updates: "inventory-updates"
+    competitor_prices: "competitor-prices"
+    promo_updates: "promo-updates"
+  consumer_groups:
+    price_monitoring: "price-monitoring-group"
+    analytics: "analytics-group"
+    notifications: "notifications-group"
+
+# Stream Processing Parameters
+processing:
+  trigger_interval: "10 seconds"
+  checkpoint_location: "abfss://checkpoints@lotusprismstorage.dfs.core.windows.net/streaming"
+  watermark_delay: "1 hours"
+  output_mode: "append"  # Options: append, complete, update
+
+# Delta Lake
+delta:
+  silver_layer_path: "abfss://data@lotusprismstorage.dfs.core.windows.net/silver"
+  gold_layer_path: "abfss://data@lotusprismstorage.dfs.core.windows.net/gold"
+  optimize_interval_ms: 300000  # 5 minutes
+
+# Window Operations
+window:
+  price_change_window: "15 minutes"
+  aggregation_window: "1 hours"
+  comparison_window: "1 days"
+  sensitivity_window: "7 days"
+
+# Notifications
+notifications:
+  price_change_threshold: 0.05  # 5% change to trigger notification
+  significant_price_drop_threshold: 0.1  # 10% drop
+  anomaly_zscore_threshold: 3.0
+  channels:
+    email:
+      enabled: true
+      admin_emails: ["admin@lotusretail.com", "pricing@lotusretail.com"]
+    webhook:
+      enabled: true
+      endpoint: "https://api.lotusretail.com/notifications/webhooks"
+    sms:
+      enabled: false
+    service_bus_topic:
+      enabled: true
+      topic_name: "price-alerts"
+
+# Price Change Detection
+price_detection:
+  min_price_for_monitoring: 10000  # VND
+  competitor_weights:
+    aeon: 0.4
+    lotte: 0.3
+    winmart: 0.3
+  store_proximity_threshold_km: 5
+
+# Simulator Configuration (for development/testing)
+simulator:
+  enabled: true
+  rate: 10  # events per second
+  distribution:
+    normal_price_changes: 0.7
+    significant_drops: 0.15
+    significant_increases: 0.15
+  randomization:
+    min_price_change: 0.01  # 1%
+    max_price_change: 0.3   # 30%
+
+# Spark Streaming Configuration
+spark:
+  executor_memory: "4g"
+  executor_cores: 2
+  driver_memory: "4g"
+  max_executors: 8
+  log_level: "WARN"

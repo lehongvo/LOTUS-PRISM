@@ -1,0 +1,14 @@
+{
+  "name": "LOTUS-PRISM Streaming Job",
+  "existing_cluster_id": "0515-041150-fjdjiv2q",
+  "notebook_task": {
+    "notebook_path": "/LOTUS-PRISM/streaming_demo",
+    "base_parameters": {
+      "config_path": "dbfs:/FileStore/LOTUS-PRISM/configs/streaming_config.yaml"
+    }
+  },
+  "timeout_seconds": 0,
+  "retry_on_timeout": false,
+  "max_retries": 1,
+  "max_concurrent_runs": 1
+} 

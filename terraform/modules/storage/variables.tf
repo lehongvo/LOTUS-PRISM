@@ -9,8 +9,9 @@ variable "location" {
 }
 
 variable "storage_account_name" {
-  description = "The name of the storage account for data lake"
+  description = "Name of the storage account"
   type        = string
+  default     = "lotusprismdevadls98765"
 }
 
 variable "storage_account_tier" {

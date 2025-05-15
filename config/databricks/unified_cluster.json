@@ -1,0 +1,36 @@
+{
+  "cluster_name": "LOTUS-PRISM-Unified",
+  "spark_version": "13.3.x-scala2.12",
+  "spark_conf": {
+    "spark.master": "local[*, 4]",
+    "spark.databricks.cluster.profile": "singleNode"
+  },
+  "azure_attributes": {
+    "first_on_demand": 1,
+    "availability": "SPOT_WITH_FALLBACK_AZURE",
+    "spot_bid_max_price": -1
+  },
+  "node_type_id": "Standard_F4",
+  "driver_node_type_id": "Standard_F4",
+  "custom_tags": {
+    "ResourceClass": "SingleNode"
+  },
+  "spark_env_vars": {
+    "PYSPARK_PYTHON": "/databricks/python3/bin/python3"
+  },
+  "autotermination_minutes": 120,
+  "enable_elastic_disk": true,
+  "single_user_name": "vincentdev924@gmail.com",
+  "data_security_mode": "LEGACY_SINGLE_USER_STANDARD",
+  "runtime_engine": "STANDARD",
+  "num_workers": 0,
+  "default_tags": {
+    "Vendor": "Databricks",
+    "Creator": "vincentdev924@gmail.com",
+    "ClusterName": "vincent Vo's Cluster1",
+    "ClusterId": "0515-033641-3b6i12ok",
+    "Environment": "Development",
+    "Owner": "Data Engineering Team",
+    "Project": "LOTUS-PRISM"
+  }
+} 

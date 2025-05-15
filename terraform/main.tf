@@ -1,10 +1,10 @@
 locals {
   resource_group_name   = var.resource_group_name != "" ? var.resource_group_name : "${var.project_name}-${var.environment}-rg"
-  storage_account_name  = var.storage_account_name != "" ? var.storage_account_name : "${replace(var.project_name, "-", "")}${var.environment}adls"
+  storage_account_name  = var.storage_account_name != "" ? var.storage_account_name : "${replace(var.project_name, "-", "")}${var.environment}adls98765"
   databricks_name       = "${var.project_name}-${var.environment}-databricks"
   synapse_name          = "${var.project_name}-${var.environment}-synapse"
   eventhub_name         = "${var.project_name}-${var.environment}-eventhub"
-  api_management_name   = "${var.project_name}-${var.environment}-apim"
+  api_management_name   = "${var.project_name}-${var.environment}-apim23456"
 }
 
 # Resource Group

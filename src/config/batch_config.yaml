@@ -1,0 +1,85 @@
+# Cấu hình batch ETL cho LOTUS-PRISM
+input_path: abfss://bronze@<storage_account>.dfs.core.windows.net/products/aeon/*.json
+output_path: abfss://silver@<storage_account>.dfs.core.windows.net/products/aeon/
+delta_table: products_aeon_silver
+validate_rules:
+  - not_null: ["product_id", "name", "price"]
+  - unique: ["product_id"]
+
+# Batch Processing Configuration
+
+# Delta Lake tables configuration
+delta:
+  bronze_layer_path: "abfss://data@lotusprismstorage.dfs.core.windows.net/bronze"
+  silver_layer_path: "abfss://data@lotusprismstorage.dfs.core.windows.net/silver"
+  gold_layer_path: "abfss://data@lotusprismstorage.dfs.core.windows.net/gold"
+
+# Data Sources
+data_sources:
+  aeon_data: "abfss://data@lotusprismstorage.dfs.core.windows.net/raw/aeon"
+  lotte_data: "abfss://data@lotusprismstorage.dfs.core.windows.net/raw/lotte"
+  mm_mega_data: "abfss://data@lotusprismstorage.dfs.core.windows.net/raw/mm_mega"
+  winmart_data: "abfss://data@lotusprismstorage.dfs.core.windows.net/raw/winmart"
+  lotus_internal_data: "abfss://data@lotusprismstorage.dfs.core.windows.net/raw/lotus_internal"
+  market_trend_data: "abfss://data@lotusprismstorage.dfs.core.windows.net/raw/market_trends"
+
+# Batch Processing Parameters
+processing:
+  write_mode: "merge"  # Options: append, overwrite, merge
+  partition_columns:
+    - "category"
+    - "date"
+  max_records_per_file: 1000000
+  optimize_interval: 10  # Optimize after 10 batch runs
+
+# Product Categorization
+product_categorization:
+  categories_master_path: "abfss://data@lotusprismstorage.dfs.core.windows.net/reference/categories_master"
+  match_threshold: 0.8  # Threshold for fuzzy matching
+
+# Price Normalization
+price_normalization:
+  unit_conversion_reference: "abfss://data@lotusprismstorage.dfs.core.windows.net/reference/unit_conversion"
+  currency: "VND"
+  vat_rate: 0.1  # 10% VAT
+
+# RFM Analysis
+rfm_analysis:
+  recency_weight: 0.35
+  frequency_weight: 0.35
+  monetary_weight: 0.3
+  lookback_days: 365  # Analyze data from last 365 days
+  segments:
+    - name: "Champions"
+      min_score: 4.5
+      max_score: 5.0
+    - name: "Loyal Customers"
+      min_score: 3.5
+      max_score: 4.5
+    - name: "Potential Loyalists"
+      min_score: 3.0
+      max_score: 3.5
+    - name: "At Risk Customers"
+      min_score: 2.0
+      max_score: 3.0
+    - name: "Hibernating"
+      min_score: 1.0
+      max_score: 2.0
+
+# Data Validation
+validation:
+  min_records_threshold: 1000
+  max_null_percentage: 0.05  # 5% 
+  price_min_threshold: 1000  # Minimum valid price in VND
+  price_max_threshold: 100000000  # Maximum valid price in VND
+  enable_schema_validation: true
+  enable_data_quality_checks: true
+  notify_on_failure: true
+
+# Spark Configuration
+spark:
+  executor_memory: "8g"
+  executor_cores: 4
+  driver_memory: "4g"
+  max_executors: 10
+  log_level: "WARN"

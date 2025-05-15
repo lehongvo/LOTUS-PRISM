@@ -82,7 +82,7 @@ htmlcov/
 # Ignore build artifacts
 dist/
 build/
-*.egg-info/
+*.egg-info/ 
 
 # Environment variables
 .env
