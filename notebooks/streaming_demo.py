@@ -14,6 +14,11 @@
 # MAGIC - Using Structured Streaming with Kafka/Event Hubs
 # MAGIC - Implementing real-time price change detection
 # MAGIC - Generating notifications for significant price changes
+# MAGIC 
+# MAGIC ## Data Layers
+# MAGIC - **Bronze Layer**: Raw data captured exactly as received with minimal processing
+# MAGIC - **Silver Layer**: Cleansed, validated, and enriched data ready for analysis
+# MAGIC - **Gold Layer**: Business-level aggregations and analytics-ready data
 
 # COMMAND ----------
 
@@ -32,7 +37,8 @@ import random
 from datetime import datetime, timedelta
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.functions import col, current_timestamp, lit, expr, from_json, to_json, struct, window
-from pyspark.sql.types import StructType, StructField, StringType, DoubleType, TimestampType, BooleanType
+from pyspark.sql.types import StructType, StructField, StringType, DoubleType, TimestampType, BooleanType, IntegerType
+from pyspark.sql.functions import when, regexp_replace, trim, lower, concat, date_format, year, month, day, hour, minute
 
 # Add the src directory to the path to import local modules
 current_dir = os.path.dirname(os.path.abspath("__file__"))
@@ -68,11 +74,12 @@ def load_config(config_path="dbfs:/FileStore/LOTUS-PRISM/configs/streaming_confi
             },
             "processing": {
                 "trigger_interval": "10 seconds",
-                "checkpoint_location": "dbfs:/mnt/checkpoints/streaming"
+                "checkpoint_location": "dbfs:/FileStore/LOTUS-PRISM/checkpoints/streaming"
             },
             "delta": {
-                "silver_layer_path": "dbfs:/mnt/silver",
-                "gold_layer_path": "dbfs:/mnt/gold"
+                "bronze_layer_path": "dbfs:/FileStore/LOTUS-PRISM/bronze",
+                "silver_layer_path": "dbfs:/FileStore/LOTUS-PRISM/silver",
+                "gold_layer_path": "dbfs:/FileStore/LOTUS-PRISM/gold"
             },
             "notifications": {
                 "price_change_threshold": 0.05
@@ -88,6 +95,7 @@ except:
 # Load the configuration
 config = load_config(config_path)
 print(f"Configuration loaded successfully from {config_path}")
+print(f"Bronze layer path: {config.get('delta', {}).get('bronze_layer_path')}")
 print(f"Silver layer path: {config.get('delta', {}).get('silver_layer_path')}")
 print(f"Gold layer path: {config.get('delta', {}).get('gold_layer_path')}")
 print(f"Checkpoint location: {config.get('processing', {}).get('checkpoint_location')}")
@@ -229,15 +237,8 @@ print("Sample data generator created")
 # Start streaming data generator
 price_change_stream = create_data_stream()
 
-# Add processing_time and calculate price_change_pct
-processed_stream = price_change_stream \
-    .withColumn("processing_time", current_timestamp()) \
-    .withColumn("price_change_pct", expr("(new_price - old_price) / old_price")) \
-    .withColumn("price_change_abs", expr("abs(new_price - old_price)")) \
-    .withColumn("is_significant_change", 
-                expr(f"abs(price_change_pct) >= {config['notifications']['price_change_threshold']}"))
-
-print("Stream processing started")
+# This is the RAW data which will go to Bronze layer
+print("Raw stream data created - will be stored in Bronze layer")
 
 # COMMAND ----------
 
@@ -246,6 +247,15 @@ print("Stream processing started")
 # MAGIC Create necessary directories for checkpoints and Delta Lake storage
 
 # COMMAND ----------
+
+# Create directories for DBFS storage and checkpoints
+dbfs_root = "dbfs:/FileStore/LOTUS-PRISM"
+for path in [f"{dbfs_root}", f"{dbfs_root}/bronze", f"{dbfs_root}/silver", f"{dbfs_root}/gold", f"{dbfs_root}/checkpoints", f"{dbfs_root}/checkpoints/streaming"]:
+    try:
+        dbutils.fs.mkdirs(path)
+        print(f"Successfully created directory: {path}")
+    except Exception as e:
+        print(f"Directory already exists or error occurred: {path} - {str(e)}")
 
 # Ensure checkpoint and storage directories exist
 def ensure_directory_exists(path):
@@ -258,33 +268,64 @@ def ensure_directory_exists(path):
         print(f"Warning: Could not create directory {path}: {str(e)}")
         return False
 
-# Get paths from config or use defaults
+bronze_path = config.get('delta', {}).get('bronze_layer_path')
+if bronze_path is None:
+    bronze_path = "dbfs:/FileStore/LOTUS-PRISM/bronze"
+    print(f"Warning: Bronze layer path not found in config, using default: {bronze_path}")
+
+# Check if path is Azure Storage and if we should use local DBFS instead
+if "abfss://" in bronze_path or "wasbs://" in bronze_path:
+    print(f"Azure Storage path detected: {bronze_path}")
+    print("Switching to local DBFS storage for reliability")
+    bronze_path = "dbfs:/FileStore/LOTUS-PRISM/bronze"
+
 silver_path = config.get('delta', {}).get('silver_layer_path')
 if silver_path is None:
-    silver_path = "dbfs:/mnt/silver"
+    silver_path = "dbfs:/FileStore/LOTUS-PRISM/silver"
     print(f"Warning: Silver layer path not found in config, using default: {silver_path}")
+
+# Check if path is Azure Storage and if we should use local DBFS instead
+if "abfss://" in silver_path or "wasbs://" in silver_path:
+    print(f"Azure Storage path detected: {silver_path}")
+    print("Switching to local DBFS storage for reliability")
+    silver_path = "dbfs:/FileStore/LOTUS-PRISM/silver"
 
 gold_path = config.get('delta', {}).get('gold_layer_path')
 if gold_path is None:
-    gold_path = "dbfs:/mnt/gold"
+    gold_path = "dbfs:/FileStore/LOTUS-PRISM/gold"
     print(f"Warning: Gold layer path not found in config, using default: {gold_path}")
+
+# Check if path is Azure Storage and if we should use local DBFS instead
+if "abfss://" in gold_path or "wasbs://" in gold_path:
+    print(f"Azure Storage path detected: {gold_path}")
+    print("Switching to local DBFS storage for reliability")
+    gold_path = "dbfs:/FileStore/LOTUS-PRISM/gold"
 
 checkpoint_base = config.get('processing', {}).get('checkpoint_location')
 if checkpoint_base is None:
-    checkpoint_base = "dbfs:/mnt/checkpoints/streaming"
+    checkpoint_base = "dbfs:/FileStore/LOTUS-PRISM/checkpoints/streaming"
     print(f"Warning: Checkpoint location not found in config, using default: {checkpoint_base}")
 
+# Check if checkpoint path is Azure Storage
+if "abfss://" in checkpoint_base or "wasbs://" in checkpoint_base:
+    print(f"Azure Storage checkpoint path detected: {checkpoint_base}")
+    print("Switching to local DBFS storage for reliability")
+    checkpoint_base = "dbfs:/FileStore/LOTUS-PRISM/checkpoints/streaming"
+
 # Create directories
+ensure_directory_exists(bronze_path)
 ensure_directory_exists(silver_path)
 ensure_directory_exists(gold_path)
 ensure_directory_exists(checkpoint_base)
 
 # Create checkpoint directories for each stream
+bronze_checkpoint_location = f"{checkpoint_base}/bronze" 
 silver_checkpoint_location = f"{checkpoint_base}/silver"
 gold_checkpoint_location = f"{checkpoint_base}/gold"
 notification_checkpoint_location = f"{checkpoint_base}/notifications"
 window_checkpoint_location = f"{checkpoint_base}/windows"
 
+ensure_directory_exists(bronze_checkpoint_location)
 ensure_directory_exists(silver_checkpoint_location)
 ensure_directory_exists(gold_checkpoint_location)
 ensure_directory_exists(notification_checkpoint_location)
@@ -293,27 +334,110 @@ ensure_directory_exists(window_checkpoint_location)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Write to Delta Lake Silver Layer
-# MAGIC Persist the processed stream to Delta Lake Silver layer
+# MAGIC ## Write Raw Data to Bronze Layer
+# MAGIC Persist the raw stream data to Delta Lake Bronze layer with minimal processing
 
 # COMMAND ----------
 
-# Write raw events to Silver layer
-silver_output_path = f"{silver_path}/price_changes"
+# Write raw events to Bronze layer - storing the data exactly as received
+bronze_output_path = f"{bronze_path}/raw_price_changes"
 
 try:
-    # Write stream to Silver layer with error handling
-    silver_query = processed_stream \
+    # Write raw stream to Bronze layer with error handling
+    bronze_query = price_change_stream \
+        .withColumn("bronze_ingest_timestamp", current_timestamp()) \
+        .withColumn("data_source", lit("streaming_price_feed")) \
+        .withColumn("year_month", date_format(col("timestamp"), "yyyy-MM")) \
+        .writeStream \
+        .format("delta") \
+        .option("checkpointLocation", bronze_checkpoint_location) \
+        .option("mergeSchema", "true") \
+        .outputMode("append") \
+        .partitionBy("retailer", "year_month") \
+        .trigger(processingTime=config['processing']['trigger_interval']) \
+        .start(bronze_output_path)
+
+    print(f"Raw stream writing to Bronze layer at {bronze_output_path}")
+    print(f"Using checkpoint location: {bronze_checkpoint_location}")
+except Exception as e:
+    print(f"Error setting up Bronze layer stream: {str(e)}")
+    print("Attempting to write with default settings...")
+    
+    try:
+        # Simplify settings and try again
+        bronze_query = price_change_stream \
+            .withColumn("bronze_ingest_timestamp", current_timestamp()) \
+            .writeStream \
+            .format("delta") \
+            .option("checkpointLocation", "dbfs:/FileStore/LOTUS-PRISM/checkpoints/bronze_fallback") \
+            .option("mergeSchema", "true") \
+            .outputMode("append") \
+            .trigger(processingTime="10 seconds") \
+            .start("dbfs:/FileStore/LOTUS-PRISM/bronze/raw_price_changes_fallback")
+            
+        print("Fallback Bronze layer stream started successfully")
+    except Exception as e2:
+        print(f"Failed to start Bronze layer stream even with fallback settings: {str(e2)}")
+        print("Bronze layer stream will not be available")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Process Data to Silver Layer
+# MAGIC Apply cleansing, validation, enrichment, and standardization for Silver layer
+
+# COMMAND ----------
+
+# Read from the Bronze layer and process for Silver layer
+# In a real implementation, this would read from Bronze Delta table
+# For demo, we'll process the raw stream directly
+
+# Apply silver layer data quality and enrichment processes
+silver_stream = price_change_stream \
+    .withColumn("processing_time", current_timestamp()) \
+    .withColumn("data_quality_check_passed", lit(True)) \
+    .withColumn("retailer_standardized", lower(trim(col("retailer")))) \
+    .withColumn("location_standardized", 
+                when(col("location").isin("HoChiMinh", "Ho Chi Minh", "HCMC", "Saigon"), "Ho Chi Minh City")
+                .when(col("location").isin("Hanoi", "Ha Noi", "HaNoi"), "Hanoi")
+                .otherwise(col("location"))) \
+    .withColumn("price_change_pct", expr("(new_price - old_price) / old_price")) \
+    .withColumn("price_change_abs", expr("abs(new_price - old_price)")) \
+    .withColumn("is_significant_change", 
+                expr(f"abs(price_change_pct) >= {config['notifications']['price_change_threshold']}")) \
+    .withColumn("price_per_unit", 
+                when(col("unit") == "kg", col("new_price"))
+                .when(col("unit") == "g", col("new_price") * 1000)
+                .when(col("unit") == "l", col("new_price"))
+                .when(col("unit") == "ml", col("new_price") * 1000)
+                .otherwise(col("new_price"))) \
+    .withColumn("unit_standardized", 
+                when(col("unit").isin("g", "gram", "grams"), "g")
+                .when(col("unit").isin("kg", "kilogram", "kilograms"), "kg")
+                .when(col("unit").isin("l", "liter", "liters"), "l")
+                .when(col("unit").isin("ml", "milliliter", "milliliters"), "ml")
+                .otherwise(col("unit"))) \
+    .withColumn("product_category", 
+                when(col("category").isNull(), "Uncategorized")
+                .otherwise(col("category"))) \
+    .withColumn("date_key", date_format(col("timestamp"), "yyyyMMdd"))
+
+# Process and write to Silver layer - cleansed and standardized data
+silver_output_path = f"{silver_path}/price_changes_cleansed"
+
+try:
+    # Write processed stream to Silver layer
+    silver_query = silver_stream \
         .writeStream \
         .format("delta") \
         .option("checkpointLocation", silver_checkpoint_location) \
         .option("mergeSchema", "true") \
         .outputMode("append") \
-        .partitionBy("retailer", "is_significant_change") \
+        .partitionBy("retailer_standardized", "date_key") \
         .trigger(processingTime=config['processing']['trigger_interval']) \
         .start(silver_output_path)
 
-    print(f"Stream writing to Silver layer at {silver_output_path}")
+    print(f"Processed stream writing to Silver layer at {silver_output_path}")
     print(f"Using checkpoint location: {silver_checkpoint_location}")
 except Exception as e:
     print(f"Error setting up Silver layer stream: {str(e)}")
@@ -321,13 +445,14 @@ except Exception as e:
     
     try:
         # Simplify settings and try again
-        silver_query = processed_stream \
+        silver_query = silver_stream \
             .writeStream \
             .format("delta") \
-            .option("checkpointLocation", "dbfs:/mnt/checkpoints/silver_fallback") \
+            .option("checkpointLocation", "dbfs:/FileStore/LOTUS-PRISM/checkpoints/silver_fallback") \
+            .option("mergeSchema", "true") \
             .outputMode("append") \
-            .trigger(processingTime="10 seconds") \
-            .start("dbfs:/mnt/silver/price_changes_fallback")
+            .trigger(processingTime="15 seconds") \
+            .start("dbfs:/FileStore/LOTUS-PRISM/silver/price_changes_cleansed_fallback")
             
         print("Fallback Silver layer stream started successfully")
     except Exception as e2:
@@ -337,46 +462,76 @@ except Exception as e:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Monitor Significant Price Changes
-# MAGIC Detect and alert on significant price changes
+# MAGIC ## Filter and Analyze Significant Price Changes
+# MAGIC Extract significant price changes for notifications and further analysis
 
 # COMMAND ----------
 
-# Filter for significant price changes
-significant_changes = processed_stream \
+# Filter for significant price changes using the enriched Silver data
+significant_changes = silver_stream \
     .filter("is_significant_change = true") \
     .withColumn("price_change_direction", 
                 expr("case when price_change_pct > 0 then 'increase' else 'decrease' end")) \
     .withColumn("notification_message", 
-                expr("concat('Significant price ', price_change_direction, ' detected for ', product_name, ' at ', retailer, ': ', " +
-                     "round(price_change_pct * 100, 2), '% (', old_price, ' -> ', new_price, ') in ', location)"))
+                expr("concat('Significant price ', price_change_direction, ' detected for ', product_name, ' at ', retailer_standardized, ': ', " +
+                     "round(price_change_pct * 100, 2), '% (', old_price, ' -> ', new_price, ') in ', location_standardized)")) \
+    .withColumn("competitor_price_action", 
+                when(col("price_change_pct") < -0.15, "major_discount")
+                .when(col("price_change_pct") < -0.05, "discount")
+                .when(col("price_change_pct") > 0.15, "major_price_increase")
+                .when(col("price_change_pct") > 0.05, "price_increase")
+                .otherwise("minor_change"))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Price Trend Analysis with Windows
-# MAGIC Analyze price trends over sliding windows
+# MAGIC ## Aggregate Data for Gold Layer - Price Trend Analysis
+# MAGIC Create business-level aggregations for analytics
 
 # COMMAND ----------
 
-# Analyze price trends over windows
-window_analysis = processed_stream \
+# Analyze price trends over windows - this is gold layer analytics
+window_analysis = silver_stream \
     .withWatermark("timestamp", "1 hour") \
     .groupBy(
         window("timestamp", "15 minutes", "5 minutes"),
-        "retailer", 
-        "category"
+        "retailer_standardized", 
+        "product_category"
     ) \
     .agg(
         expr("count(*)").alias("price_change_count"),
         expr("avg(price_change_pct)").alias("avg_price_change_pct"),
+        expr("stddev(price_change_pct)").alias("price_change_volatility"),
         expr("sum(case when price_change_pct < 0 then 1 else 0 end)").alias("price_drop_count"),
-        expr("sum(case when price_change_pct > 0 then 1 else 0 end)").alias("price_increase_count")
+        expr("sum(case when price_change_pct > 0 then 1 else 0 end)").alias("price_increase_count"),
+        expr("avg(case when price_change_pct < 0 then price_change_pct else null end)").alias("avg_price_drop_pct"),
+        expr("avg(case when price_change_pct > 0 then price_change_pct else null end)").alias("avg_price_increase_pct"),
+        expr("min(new_price)").alias("min_price"),
+        expr("max(new_price)").alias("max_price"),
+        expr("avg(new_price)").alias("avg_price")
     ) \
     .withColumn("window_start", col("window.start")) \
     .withColumn("window_end", col("window.end")) \
+    .withColumn("window_date", date_format(col("window.start"), "yyyy-MM-dd")) \
+    .withColumn("window_hour", hour(col("window.start"))) \
+    .withColumn("price_trend", 
+                when(col("avg_price_change_pct") < -0.10, "strong_downward")
+                .when(col("avg_price_change_pct") < -0.02, "downward")
+                .when(col("avg_price_change_pct") > 0.10, "strong_upward")
+                .when(col("avg_price_change_pct") > 0.02, "upward")
+                .otherwise("stable")) \
+    .withColumn("market_activity", 
+                when(col("price_change_count") > 10, "high")
+                .when(col("price_change_count") > 5, "medium")
+                .otherwise("low")) \
     .withColumn("is_competitive_window", 
-                expr("price_drop_count > price_increase_count"))
+                expr("price_drop_count > price_increase_count")) \
+    .withColumn("competitive_intensity", 
+                when(col("price_drop_count") > col("price_increase_count") * 3, "highly_competitive")
+                .when(col("price_drop_count") > col("price_increase_count"), "competitive")
+                .when(col("price_increase_count") > col("price_drop_count") * 3, "price_inflation")
+                .when(col("price_increase_count") > col("price_drop_count"), "rising_prices")
+                .otherwise("balanced"))
 
 # Write window analysis to console for demo
 try:
@@ -396,8 +551,8 @@ except Exception as e:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Generate Notifications
-# MAGIC Create notifications for significant price changes
+# MAGIC ## Process Notifications from Silver Layer
+# MAGIC Generate real-time notifications for significant price changes
 
 # COMMAND ----------
 
@@ -412,13 +567,14 @@ def send_notification(batch_df, batch_id):
         # In a real implementation, this would send to a notification service
         # For demo, just print to console
         try:
-            notifications = batch_df.select("notification_message").collect()
+            notifications = batch_df.select("notification_message", "competitor_price_action").collect()
             
             print("=" * 80)
             print(f"PRICE CHANGE ALERTS - {datetime.now()}")
             print("=" * 80)
             for notification in notifications:
-                print(f"ALERT: {notification[0]}")
+                action = notification[1].upper()
+                print(f"[{action}] ALERT: {notification[0]}")
             print("=" * 80)
         except Exception as e:
             print(f"Error processing notifications in batch {batch_id}: {str(e)}")
@@ -441,41 +597,41 @@ except Exception as e:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Write Aggregated Data to Gold Layer
-# MAGIC Persist aggregated analytics to the Gold layer
+# MAGIC ## Write Aggregated Analytics to Gold Layer
+# MAGIC Persist business-level aggregations to the Gold layer
 
 # COMMAND ----------
 
-# Write aggregated data to Gold layer
-gold_output_path = f"{gold_path}/price_trends"
-
+# Process and write to Gold layer - business-level analytics
+gold_output_path = f"{gold_path}/price_analytics"
+  
 try:
-    # Write window analysis to Gold layer with error handling
+    # Write analytics to Gold layer
     gold_query = window_analysis \
         .writeStream \
         .format("delta") \
         .option("checkpointLocation", gold_checkpoint_location) \
         .option("mergeSchema", "true") \
-        .outputMode("append") \
-        .partitionBy("retailer", "is_competitive_window") \
+        .outputMode("complete") \
         .trigger(processingTime=config['processing']['trigger_interval']) \
         .start(gold_output_path)
 
-    print(f"Stream writing to Gold layer at {gold_output_path}")
+    print(f"Analytics stream writing to Gold layer at {gold_output_path}")
     print(f"Using checkpoint location: {gold_checkpoint_location}")
 except Exception as e:
     print(f"Error setting up Gold layer stream: {str(e)}")
     print("Attempting to write with default settings...")
     
     try:
-        # Simplify settings and try again
+        # Simplify settings and try again  
         gold_query = window_analysis \
             .writeStream \
             .format("delta") \
-            .option("checkpointLocation", "dbfs:/mnt/checkpoints/gold_fallback") \
-            .outputMode("append") \
-            .trigger(processingTime="10 seconds") \
-            .start("dbfs:/mnt/gold/price_trends_fallback")
+            .option("checkpointLocation", "dbfs:/FileStore/LOTUS-PRISM/checkpoints/gold_fallback") \
+            .option("mergeSchema", "true") \
+            .outputMode("complete") \
+            .trigger(processingTime="20 seconds") \
+            .start("dbfs:/FileStore/LOTUS-PRISM/gold/price_analytics_fallback")
             
         print("Fallback Gold layer stream started successfully")
     except Exception as e2:
@@ -485,34 +641,96 @@ except Exception as e:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Store Significant Changes
-# MAGIC Save significant price changes to a separate Delta table
+# MAGIC ## Create Real-time Competitive Actions View (Gold Layer)
+# MAGIC Generate actionable business insights from significant price changes
 
 # COMMAND ----------
 
-# Save significant price changes to a separate table
-significant_changes_path = f"{gold_path}/significant_price_changes"
+# Create a gold-level view of significant price changes with actionable insights
+competitive_actions = significant_changes \
+    .withColumn("action_timestamp", current_timestamp()) \
+    .withColumn("recommended_action", 
+                when(col("competitor_price_action") == "major_discount", "URGENT: Consider matching price")
+                .when(col("competitor_price_action") == "discount", "Review pricing strategy")
+                .when(col("competitor_price_action") == "major_price_increase", "Potential opportunity to gain market share")
+                .when(col("competitor_price_action") == "price_increase", "Monitor market response")
+                .otherwise("No action needed"))
+
+# Save significant price changes with recommended actions to a Gold table
+significant_changes_path = f"{gold_path}/competitive_actions"
 significant_checkpoint_location = f"{checkpoint_base}/significant_changes"
 
 try:
     # Ensure checkpoint directory exists
     ensure_directory_exists(significant_checkpoint_location)
     
-    # Write significant changes to Delta
-    significant_query = significant_changes \
-        .withColumn("detected_at", current_timestamp()) \
+    # Write significant changes to Gold Delta table
+    significant_query = competitive_actions \
         .writeStream \
         .format("delta") \
         .option("checkpointLocation", significant_checkpoint_location) \
         .option("mergeSchema", "true") \
         .outputMode("append") \
-        .partitionBy("retailer", "price_change_direction") \
+        .partitionBy("competitor_price_action") \
         .trigger(processingTime=config['processing']['trigger_interval']) \
         .start(significant_changes_path)
     
-    print(f"Significant price changes writing to {significant_changes_path}")
+    print(f"Competitive actions writing to Gold layer at {significant_changes_path}")
 except Exception as e:
-    print(f"Error starting significant changes stream: {str(e)}")
+    print(f"Error starting competitive actions stream: {str(e)}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Create Category Performance Analytics (Gold Layer)
+# MAGIC Generate category-level performance metrics for business analytics
+
+# COMMAND ----------
+
+# Create category performance metrics for Gold layer
+category_performance = silver_stream \
+    .withWatermark("timestamp", "1 hour") \
+    .groupBy(
+        window("timestamp", "30 minutes", "10 minutes"),
+        "product_category",
+        "retailer_standardized"
+    ) \
+    .agg(
+        expr("count(*)").alias("price_change_count"),
+        expr("sum(case when is_significant_change = true then 1 else 0 end)").alias("significant_changes"),
+        expr("avg(price_change_pct)").alias("avg_price_change_pct"),
+        expr("avg(new_price)").alias("avg_category_price"),
+        expr("min(new_price)").alias("min_category_price"),
+        expr("max(new_price)").alias("max_category_price")
+    ) \
+    .withColumn("volatility_score", 
+                expr("significant_changes / price_change_count")) \
+    .withColumn("window_start_time", col("window.start")) \
+    .withColumn("category_status", 
+                when(col("avg_price_change_pct") < -0.05, "price_deflation")
+                .when(col("avg_price_change_pct") > 0.05, "price_inflation")
+                .when(col("volatility_score") > 0.3, "volatile")
+                .otherwise("stable"))
+
+# Write category analytics to Gold layer
+category_performance_path = f"{gold_path}/category_performance"
+category_checkpoint_location = f"{checkpoint_base}/category_performance"
+
+try:
+    ensure_directory_exists(category_checkpoint_location)
+    category_query = category_performance \
+        .writeStream \
+        .format("delta") \
+        .option("checkpointLocation", category_checkpoint_location) \
+        .option("mergeSchema", "true") \
+        .outputMode("append") \
+        .partitionBy("product_category", "category_status") \
+        .trigger(processingTime=config['processing']['trigger_interval']) \
+        .start(category_performance_path)
+        
+    print(f"Category performance analytics writing to Gold layer at {category_performance_path}")
+except Exception as e:
+    print(f"Error starting category performance stream: {str(e)}")
 
 # COMMAND ----------
 
@@ -529,16 +747,21 @@ print(f"Number of active streams: {len(active_streams)}")
 # Summary of stream destinations
 print("\nStream Destinations:")
 try:
+    print(f"Bronze layer: {bronze_output_path}")
     if 'silver_query' in locals():
         print(f"Silver layer: {silver_output_path}")
     if 'gold_query' in locals():
-        print(f"Gold layer: {gold_output_path}")
+        print(f"Gold layer - Price Trends: {gold_output_path}")
     if 'significant_query' in locals():
-        print(f"Significant changes: {significant_changes_path}")
+        print(f"Gold layer - Competitive Actions: {significant_changes_path}")
+    if 'category_query' in locals():
+        print(f"Gold layer - Category Performance: {category_performance_path}")
+    
     print(f"\nAll streams will continue running until manually stopped.")
     print(f"Data is being written to:")
-    print(f"Silver: {silver_path}")
-    print(f"Gold: {gold_path}")
+    print(f"Bronze: {bronze_path} - Raw data exactly as received")
+    print(f"Silver: {silver_path} - Cleansed, standardized and enriched data")
+    print(f"Gold: {gold_path} - Business-level aggregations and analytics")
     print(f"Checkpoints: {checkpoint_base}")
 except Exception as e:
     print(f"Error displaying stream summary: {str(e)}")

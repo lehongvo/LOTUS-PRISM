@@ -83,22 +83,6 @@ LOTUS-PRISM is an end-to-end data engineering solution that:
    - Develop price comparison algorithms
    - Create price sensitivity analysis by category
    - Implement historical price trend analysis
-   - Develop competitor price movement detection
-
-2. **Promotion Analytics Components**
-   - Create promotion effectiveness measurement
-   - Develop ROI calculation for promotions
-   - Implement promotion impact forecasting models
-
-3. **Product Analytics Components**
-   - Create product performance analysis by price
-   - Develop price-demand correlation models
-   - Implement product forecasting based on price changes
-
-4. **Price Optimization Models**
-   - Develop optimal price recommendation algorithms
-   - Create price adjustment simulation models
-   - Implement what-if analysis capabilities
 
 ### Phase 5: API Development
 
@@ -111,11 +95,6 @@ LOTUS-PRISM is an end-to-end data engineering solution that:
    - Implement authentication and rate limiting
    - Create API documentation with Swagger/OpenAPI
 
-2. **Integration Layer**
-   - Develop data access layer for the API
-   - Create caching mechanisms for performance
-   - Implement security and access control
-
 ### Phase 6: Dashboards and Reporting
 
 1. **Power BI Dashboard Development**
@@ -127,11 +106,6 @@ LOTUS-PRISM is an end-to-end data engineering solution that:
      - Price optimization recommendations
    - Implement scheduled refresh and alerts
    - Create executive summary reports
-
-2. **Automated Reporting**
-   - Set up scheduled report generation
-   - Create email/notification delivery system
-   - Implement report customization options
 
 ### Phase 7: Testing and Optimization
 
