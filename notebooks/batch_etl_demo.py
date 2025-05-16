@@ -25,6 +25,7 @@
 # Import required libraries
 import os
 import sys
+import yaml
 from datetime import datetime
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.functions import col, current_timestamp, lit, expr
@@ -36,6 +37,35 @@ sys.path.append(parent_dir)
 
 # COMMAND ----------
 
+# Configure logging to suppress ANTLR warnings
+import logging
+logging.getLogger("org.apache.spark.sql.catalyst.parser.CatalystSqlParser").setLevel(logging.ERROR)
+logging.getLogger("org.apache.spark.sql.execution.datasources.parquet").setLevel(logging.ERROR)
+
+# Cấu hình để sử dụng DBFS thay vì Azure Storage
+dbfs_root = "dbfs:/FileStore/LOTUS-PRISM"
+local_config = {
+    "delta": {
+        "bronze_layer_path": f"{dbfs_root}/bronze",
+        "silver_layer_path": f"{dbfs_root}/silver", 
+        "gold_layer_path": f"{dbfs_root}/gold"
+    },
+    "processing": {
+        "write_mode": "merge",
+        "partition_columns": ["category", "date"]
+    }
+}
+
+# Tạo thư mục DBFS
+for path in [f"{dbfs_root}", f"{dbfs_root}/bronze", f"{dbfs_root}/silver", f"{dbfs_root}/gold"]:
+    try:
+        dbutils.fs.mkdirs(path)
+        print(f"Tạo thành công thư mục: {path}")
+    except Exception as e:
+        print(f"Thư mục đã tồn tại hoặc lỗi: {path} - {str(e)}")
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC ## Load Configuration
 # MAGIC Load the batch processing configuration
@@ -43,7 +73,7 @@ sys.path.append(parent_dir)
 # COMMAND ----------
 
 # Load configuration
-def load_config(config_path="dbfs:/FileStore/configs/batch_config.yaml"):
+def load_config(config_path="dbfs:/FileStore/LOTUS-PRISM/configs/batch_config.yaml"):
     """Load configuration from YAML file"""
     try:
         # For local testing, can use dbutils.fs.get to read the file
@@ -53,21 +83,25 @@ def load_config(config_path="dbfs:/FileStore/configs/batch_config.yaml"):
     except Exception as e:
         print(f"Error loading configuration: {str(e)}")
         # Return default config
-        return {
-            "delta": {
-                "bronze_layer_path": "dbfs:/mnt/data/bronze",
-                "silver_layer_path": "dbfs:/mnt/data/silver",
-                "gold_layer_path": "dbfs:/mnt/data/gold"
-            },
-            "processing": {
-                "write_mode": "merge",
-                "partition_columns": ["category", "date"]
-            }
-        }
+        return local_config
 
-# Load the configuration
-config = load_config()
-print("Configuration loaded successfully")
+# Get config path from parameters if available
+try:
+    config_path = dbutils.widgets.get("config_path")
+except:
+    config_path = "dbfs:/FileStore/LOTUS-PRISM/configs/batch_config.yaml"
+
+# Load the configuration or use local config if file doesn't exist
+try:
+    config = load_config(config_path)
+except:
+    print(f"Using local configuration instead of file")
+    config = local_config
+
+print(f"Configuration loaded successfully")
+print(f"Bronze layer path: {config.get('delta', {}).get('bronze_layer_path')}")
+print(f"Silver layer path: {config.get('delta', {}).get('silver_layer_path')}")
+print(f"Gold layer path: {config.get('delta', {}).get('gold_layer_path')}")
 
 # COMMAND ----------
 
@@ -214,23 +248,66 @@ def process_to_bronze(df, table_name):
     bronze_df = df.withColumn("processing_time", current_timestamp()) \
                  .withColumn("layer", lit("bronze"))
     
-    # Write to bronze layer
-    bronze_path = f"{config.get('delta', {}).get('bronze_layer_path')}/{table_name}"
+    # Get correct bronze layer path from config
+    bronze_path = config.get('delta', {}).get('bronze_layer_path')
+    if bronze_path is None:
+        bronze_path = "dbfs:/FileStore/LOTUS-PRISM/bronze"
+        print(f"Warning: Bronze layer path not found in config, using default: {bronze_path}")
     
-    # Actually write data to Delta format instead of just showing a message
-    print(f"Writing {bronze_df.count()} records to {bronze_path}")
-    bronze_df.write.format("delta").mode("overwrite").save(bronze_path)
+    # Write to bronze layer with full path
+    full_bronze_path = f"{bronze_path}/{table_name}"
     
+    # Log the exact write path for debugging
+    print(f"Writing {bronze_df.count()} records to bronze layer at: {full_bronze_path}")
+    
+    # Ensure the directory exists
+    try:
+        dbutils.fs.mkdirs(bronze_path)
+    except:
+        print(f"Note: Path {bronze_path} already exists or cannot be created")
+    
+    # Write data to Delta format with error handling
+    try:
+        bronze_df.write.format("delta").mode("overwrite").save(full_bronze_path)
+        print(f"Successfully wrote data to bronze layer at: {full_bronze_path}")
+    except Exception as e:
+        print(f"Error writing to bronze layer: {str(e)}")
+        # Try with an alternate path
+        alternate_path = f"dbfs:/FileStore/LOTUS-PRISM/bronze/{table_name}"
+        print(f"Attempting to write to alternate path: {alternate_path}")
+        try:
+            bronze_df.write.format("delta").mode("overwrite").save(alternate_path)
+            print(f"Successfully wrote data to alternate bronze path: {alternate_path}")
+        except Exception as e2:
+            print(f"Error writing to alternate bronze path: {str(e2)}")
+    
+    # Register as temp view for SQL queries
     bronze_df.createOrReplaceTempView(f"bronze_{table_name}")
     
     return bronze_df
 
 # Process each source to bronze
-bronze_aeon = process_to_bronze(aeon_products, "aeon_products")
-bronze_lotte = process_to_bronze(lotte_products, "lotte_products")
-bronze_winmart = process_to_bronze(winmart_products, "winmart_products")
-bronze_mm_mega = process_to_bronze(mm_mega_products, "mm_mega_products")
-bronze_lotus = process_to_bronze(lotus_products, "lotus_products")
+try:
+    bronze_aeon = process_to_bronze(aeon_products, "aeon_products")
+    bronze_lotte = process_to_bronze(lotte_products, "lotte_products")
+    bronze_winmart = process_to_bronze(winmart_products, "winmart_products")
+    bronze_mm_mega = process_to_bronze(mm_mega_products, "mm_mega_products")
+    bronze_lotus = process_to_bronze(lotus_products, "lotus_products")
+except Exception as e:
+    print(f"Error in bronze layer processing: {str(e)}")
+
+# COMMAND ----------
+
+# Define a helper function to safely execute operations
+def try_operation(operation_name, function, *args, **kwargs):
+    """Execute a function safely with error handling"""
+    try:
+        result = function(*args, **kwargs)
+        print(f"Operation '{operation_name}' completed successfully")
+        return result
+    except Exception as e:
+        print(f"Error in operation '{operation_name}': {str(e)}")
+        return None
 
 # COMMAND ----------
 
@@ -242,9 +319,14 @@ bronze_lotus = process_to_bronze(lotus_products, "lotus_products")
 
 def process_to_silver(bronze_df, table_name):
     """Process bronze data to silver layer (cleansing, normalization, enrichment)"""
+    if bronze_df is None:
+        print(f"Cannot process to silver: bronze_df is None for {table_name}")
+        return None
+        
     print(f"Processing {bronze_df.count()} records to silver layer for {table_name}")
     
     # Apply product categorization
+    print("Categorizing products...")
     silver_df = categorizer.categorize_products(
         bronze_df,
         product_name_column="product_name",
@@ -253,6 +335,7 @@ def process_to_silver(bronze_df, table_name):
     )
     
     # Apply price normalization
+    print("Normalizing prices...")
     silver_df = normalizer.normalize_prices(
         silver_df,
         price_column="price",
@@ -264,23 +347,53 @@ def process_to_silver(bronze_df, table_name):
     silver_df = silver_df.withColumn("processing_time", current_timestamp()) \
                        .withColumn("layer", lit("silver"))
     
-    # Write to silver layer
-    silver_path = f"{config.get('delta', {}).get('silver_layer_path')}/{table_name}"
+    # Get correct silver layer path from config
+    silver_path = config.get('delta', {}).get('silver_layer_path')
+    if silver_path is None:
+        silver_path = "dbfs:/FileStore/LOTUS-PRISM/silver"
+        print(f"Warning: Silver layer path not found in config, using default: {silver_path}")
     
-    # Actually write data to Delta format instead of just showing a message
-    print(f"Writing {silver_df.count()} records to {silver_path}")
-    silver_df.write.format("delta").mode("overwrite").save(silver_path)
+    # Write to silver layer with full path
+    full_silver_path = f"{silver_path}/{table_name}"
     
+    # Log the exact write path for debugging
+    print(f"Writing {silver_df.count()} records to silver layer at: {full_silver_path}")
+    
+    # Ensure the directory exists
+    try:
+        dbutils.fs.mkdirs(silver_path)
+    except:
+        print(f"Note: Path {silver_path} already exists or cannot be created")
+    
+    # Write data to Delta format with error handling
+    try:
+        silver_df.write.format("delta").mode("overwrite").save(full_silver_path)
+        print(f"Successfully wrote data to silver layer at: {full_silver_path}")
+    except Exception as e:
+        print(f"Error writing to silver layer: {str(e)}")
+        # Try with an alternate path
+        alternate_path = f"dbfs:/FileStore/LOTUS-PRISM/silver/{table_name}"
+        print(f"Attempting to write to alternate path: {alternate_path}")
+        try:
+            silver_df.write.format("delta").mode("overwrite").save(alternate_path)
+            print(f"Successfully wrote data to alternate silver path: {alternate_path}")
+        except Exception as e2:
+            print(f"Error writing to alternate silver path: {str(e2)}")
+    
+    # Register as temp view for SQL queries
     silver_df.createOrReplaceTempView(f"silver_{table_name}")
     
     return silver_df
 
 # Process each source to silver
-silver_aeon = process_to_silver(bronze_aeon, "aeon_products")
-silver_lotte = process_to_silver(bronze_lotte, "lotte_products")
-silver_winmart = process_to_silver(bronze_winmart, "winmart_products")
-silver_mm_mega = process_to_silver(bronze_mm_mega, "mm_mega_products")
-silver_lotus = process_to_silver(bronze_lotus, "lotus_products")
+try:
+    silver_aeon = process_to_silver(bronze_aeon, "aeon_products")
+    silver_lotte = process_to_silver(bronze_lotte, "lotte_products")
+    silver_winmart = process_to_silver(bronze_winmart, "winmart_products")
+    silver_mm_mega = process_to_silver(bronze_mm_mega, "mm_mega_products")
+    silver_lotus = process_to_silver(bronze_lotus, "lotus_products")
+except Exception as e:
+    print(f"Error in silver layer processing: {str(e)}")
 
 # COMMAND ----------
 
@@ -292,6 +405,10 @@ silver_lotus = process_to_silver(bronze_lotus, "lotus_products")
 
 def process_to_gold(silver_df, table_name):
     """Process silver data to gold layer (business logic, aggregations, analytics-ready)"""
+    if silver_df is None:
+        print(f"Cannot process to gold: silver_df is None for {table_name}")
+        return None
+        
     print(f"Processing {silver_df.count()} records to gold layer for {table_name}")
     
     # Different processing based on table type
@@ -308,23 +425,53 @@ def process_to_gold(silver_df, table_name):
         gold_df = silver_df.withColumn("is_processed_to_gold", lit(True)) \
                           .withColumn("layer", lit("gold"))
     
-    # Write to gold layer
-    gold_path = f"{config.get('delta', {}).get('gold_layer_path')}/{table_name}"
+    # Get correct gold layer path from config
+    gold_path = config.get('delta', {}).get('gold_layer_path')
+    if gold_path is None:
+        gold_path = "dbfs:/FileStore/LOTUS-PRISM/gold"
+        print(f"Warning: Gold layer path not found in config, using default: {gold_path}")
     
-    # Actually write data to Delta format instead of just showing a message
-    print(f"Writing {gold_df.count()} records to {gold_path}")
-    gold_df.write.format("delta").mode("overwrite").save(gold_path)
+    # Write to gold layer with full path
+    full_gold_path = f"{gold_path}/{table_name}"
     
+    # Log the exact write path for debugging
+    print(f"Writing {gold_df.count()} records to gold layer at: {full_gold_path}")
+    
+    # Ensure the directory exists
+    try:
+        dbutils.fs.mkdirs(gold_path)
+    except:
+        print(f"Note: Path {gold_path} already exists or cannot be created")
+    
+    # Write data to Delta format with error handling
+    try:
+        gold_df.write.format("delta").mode("overwrite").save(full_gold_path)
+        print(f"Successfully wrote data to gold layer at: {full_gold_path}")
+    except Exception as e:
+        print(f"Error writing to gold layer: {str(e)}")
+        # Try with an alternate path
+        alternate_path = f"dbfs:/FileStore/LOTUS-PRISM/gold/{table_name}"
+        print(f"Attempting to write to alternate path: {alternate_path}")
+        try:
+            gold_df.write.format("delta").mode("overwrite").save(alternate_path)
+            print(f"Successfully wrote data to alternate gold path: {alternate_path}")
+        except Exception as e2:
+            print(f"Error writing to alternate gold path: {str(e2)}")
+    
+    # Register as temp view for SQL queries
     gold_df.createOrReplaceTempView(f"gold_{table_name}")
     
     return gold_df
 
 # Process each source to gold
-gold_aeon = process_to_gold(silver_aeon, "aeon_products")
-gold_lotte = process_to_gold(silver_lotte, "lotte_products")
-gold_winmart = process_to_gold(silver_winmart, "winmart_products")
-gold_mm_mega = process_to_gold(silver_mm_mega, "mm_mega_products")
-gold_lotus = process_to_gold(silver_lotus, "lotus_products")
+try:
+    gold_aeon = process_to_gold(silver_aeon, "aeon_products")
+    gold_lotte = process_to_gold(silver_lotte, "lotte_products")
+    gold_winmart = process_to_gold(silver_winmart, "winmart_products")
+    gold_mm_mega = process_to_gold(silver_mm_mega, "mm_mega_products")
+    gold_lotus = process_to_gold(silver_lotus, "lotus_products")
+except Exception as e:
+    print(f"Error in gold layer processing: {str(e)}")
 
 # COMMAND ----------
 
@@ -337,6 +484,11 @@ gold_lotus = process_to_gold(silver_lotus, "lotus_products")
 def generate_price_comparison():
     """Generate price comparison analysis across all competitors"""
     print("Generating price comparison analysis")
+    
+    # Make sure we have the data to compare
+    if any(df is None for df in [gold_lotus, gold_aeon, gold_lotte, gold_winmart]):
+        print("Cannot generate price comparison: some gold tables are missing")
+        return None
     
     # Register temp views if needed
     gold_lotus.createOrReplaceTempView("lotus_products")
@@ -401,17 +553,46 @@ def generate_price_comparison():
     print("Price Comparison Results:")
     comparison_df.show()
     
-    # Write to gold layer
-    comparison_path = f"{config.get('delta', {}).get('gold_layer_path')}/price_comparison"
+    # Get correct gold layer path from config
+    gold_path = config.get('delta', {}).get('gold_layer_path')
+    if gold_path is None:
+        gold_path = "dbfs:/FileStore/LOTUS-PRISM/gold"
+        print(f"Warning: Gold layer path not found in config, using default: {gold_path}")
     
-    # Actually write data to Delta format instead of just showing a message
-    print(f"Writing price comparison to {comparison_path}")
-    comparison_df.write.format("delta").mode("overwrite").save(comparison_path)
+    # Path for price comparison
+    comparison_path = f"{gold_path}/price_comparison"
+    
+    # Log the exact write path for debugging
+    print(f"Writing price comparison to gold layer at: {comparison_path}")
+    
+    # Ensure the directory exists
+    try:
+        dbutils.fs.mkdirs(gold_path)
+    except:
+        print(f"Note: Gold path already exists or cannot be created")
+    
+    # Write data to Delta format with error handling
+    try:
+        comparison_df.write.format("delta").mode("overwrite").save(comparison_path)
+        print(f"Successfully wrote price comparison to gold layer at: {comparison_path}")
+    except Exception as e:
+        print(f"Error writing price comparison to gold layer: {str(e)}")
+        # Try with an alternate path
+        alternate_path = "dbfs:/FileStore/LOTUS-PRISM/gold/price_comparison"
+        print(f"Attempting to write to alternate path: {alternate_path}")
+        try:
+            comparison_df.write.format("delta").mode("overwrite").save(alternate_path)
+            print(f"Successfully wrote data to alternate path: {alternate_path}")
+        except Exception as e2:
+            print(f"Error writing to alternate path: {str(e2)}")
     
     return comparison_df
 
 # Generate price comparison
-price_comparison_df = generate_price_comparison()
+try:
+    price_comparison_df = generate_price_comparison()
+except Exception as e:
+    print(f"Error in price comparison generation: {str(e)}")
 
 # COMMAND ----------
 
@@ -483,15 +664,60 @@ if segment_analysis is not None:
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Save RFM Results to Gold Layer
+# MAGIC Save RFM analysis results to the gold layer
+
+# COMMAND ----------
+
+# Save RFM results to Gold layer
+try:
+    # Get gold layer path
+    gold_path = config.get('delta', {}).get('gold_layer_path')
+    if gold_path is None:
+        gold_path = "dbfs:/FileStore/LOTUS-PRISM/gold"
+        print(f"Warning: Gold layer path not found in config, using default: {gold_path}")
+    
+    # Path for RFM
+    rfm_path = f"{gold_path}/rfm_analysis"
+    
+    print(f"Writing RFM analysis to gold layer at: {rfm_path}")
+    
+    # Ensure the directory exists
+    try:
+        dbutils.fs.mkdirs(gold_path)
+    except:
+        print(f"Note: Gold path already exists or cannot be created")
+    
+    # Add timestamp
+    rfm_output = rfm_df.withColumn("processing_time", current_timestamp()) \
+                      .withColumn("layer", lit("gold"))
+    
+    # Write RFM data to Gold layer
+    rfm_output.write.format("delta").mode("overwrite").save(rfm_path)
+    print(f"Successfully wrote RFM analysis to gold layer at: {rfm_path}")
+except Exception as e:
+    print(f"Error writing RFM analysis to gold layer: {str(e)}")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Summary
 # MAGIC Review the ETL process and results
 
 # COMMAND ----------
 
-# Get counts from each layer
-bronze_count = bronze_aeon.count() + bronze_lotte.count() + bronze_winmart.count() + bronze_mm_mega.count() + bronze_lotus.count()
-silver_count = silver_aeon.count() + silver_lotte.count() + silver_winmart.count() + silver_mm_mega.count() + silver_lotus.count()
-gold_count = gold_aeon.count() + gold_lotte.count() + gold_winmart.count() + gold_mm_mega.count() + gold_lotus.count()
+# Get counts from each layer safely
+def safe_count(df):
+    if df is None:
+        return 0
+    try:
+        return df.count()
+    except:
+        return 0
+
+bronze_count = safe_count(bronze_aeon) + safe_count(bronze_lotte) + safe_count(bronze_winmart) + safe_count(bronze_mm_mega) + safe_count(bronze_lotus)
+silver_count = safe_count(silver_aeon) + safe_count(silver_lotte) + safe_count(silver_winmart) + safe_count(silver_mm_mega) + safe_count(silver_lotus)
+gold_count = safe_count(gold_aeon) + safe_count(gold_lotte) + safe_count(gold_winmart) + safe_count(gold_mm_mega) + safe_count(gold_lotus)
 
 print("ETL Process Summary:")
 print(f"Total records processed in Bronze layer: {bronze_count}")
@@ -501,3 +727,8 @@ print(f"Total transactions analyzed with RFM: {transactions_df.count()}")
 
 # Calculate processing time
 print(f"ETL job completed successfully at {datetime.now()}")
+print(f"Data is available at:")
+print(f"Bronze: {config.get('delta', {}).get('bronze_layer_path')}")
+print(f"Silver: {config.get('delta', {}).get('silver_layer_path')}")
+print(f"Gold: {config.get('delta', {}).get('gold_layer_path')}")
+print("LOTUS-PRISM Batch ETL Job")

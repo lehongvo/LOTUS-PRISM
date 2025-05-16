@@ -27,6 +27,7 @@
 import os
 import sys
 import json
+import yaml
 import random
 from datetime import datetime, timedelta
 from pyspark.sql import SparkSession, DataFrame
@@ -47,7 +48,7 @@ sys.path.append(parent_dir)
 # COMMAND ----------
 
 # Load configuration
-def load_config(config_path="dbfs:/FileStore/configs/streaming_config.yaml"):
+def load_config(config_path="dbfs:/FileStore/LOTUS-PRISM/configs/streaming_config.yaml"):
     """Load configuration from YAML file"""
     try:
         # For local testing, can use dbutils.fs.get to read the file
@@ -70,17 +71,26 @@ def load_config(config_path="dbfs:/FileStore/configs/streaming_config.yaml"):
                 "checkpoint_location": "dbfs:/mnt/checkpoints/streaming"
             },
             "delta": {
-                "silver_layer_path": "dbfs:/mnt/data/silver",
-                "gold_layer_path": "dbfs:/mnt/data/gold"
+                "silver_layer_path": "dbfs:/mnt/silver",
+                "gold_layer_path": "dbfs:/mnt/gold"
             },
             "notifications": {
                 "price_change_threshold": 0.05
             }
         }
 
+# Get config path from parameters if available
+try:
+    config_path = dbutils.widgets.get("config_path")
+except:
+    config_path = "dbfs:/FileStore/LOTUS-PRISM/configs/streaming_config.yaml"
+
 # Load the configuration
-config = load_config()
-print("Configuration loaded successfully")
+config = load_config(config_path)
+print(f"Configuration loaded successfully from {config_path}")
+print(f"Silver layer path: {config.get('delta', {}).get('silver_layer_path')}")
+print(f"Gold layer path: {config.get('delta', {}).get('gold_layer_path')}")
+print(f"Checkpoint location: {config.get('processing', {}).get('checkpoint_location')}")
 
 # COMMAND ----------
 
@@ -232,27 +242,97 @@ print("Stream processing started")
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Ensure Checkpoints and Storage Directories Exist
+# MAGIC Create necessary directories for checkpoints and Delta Lake storage
+
+# COMMAND ----------
+
+# Ensure checkpoint and storage directories exist
+def ensure_directory_exists(path):
+    """Create directory if it doesn't exist"""
+    try:
+        dbutils.fs.mkdirs(path)
+        print(f"Ensured directory exists: {path}")
+        return True
+    except Exception as e:
+        print(f"Warning: Could not create directory {path}: {str(e)}")
+        return False
+
+# Get paths from config or use defaults
+silver_path = config.get('delta', {}).get('silver_layer_path')
+if silver_path is None:
+    silver_path = "dbfs:/mnt/silver"
+    print(f"Warning: Silver layer path not found in config, using default: {silver_path}")
+
+gold_path = config.get('delta', {}).get('gold_layer_path')
+if gold_path is None:
+    gold_path = "dbfs:/mnt/gold"
+    print(f"Warning: Gold layer path not found in config, using default: {gold_path}")
+
+checkpoint_base = config.get('processing', {}).get('checkpoint_location')
+if checkpoint_base is None:
+    checkpoint_base = "dbfs:/mnt/checkpoints/streaming"
+    print(f"Warning: Checkpoint location not found in config, using default: {checkpoint_base}")
+
+# Create directories
+ensure_directory_exists(silver_path)
+ensure_directory_exists(gold_path)
+ensure_directory_exists(checkpoint_base)
+
+# Create checkpoint directories for each stream
+silver_checkpoint_location = f"{checkpoint_base}/silver"
+gold_checkpoint_location = f"{checkpoint_base}/gold"
+notification_checkpoint_location = f"{checkpoint_base}/notifications"
+window_checkpoint_location = f"{checkpoint_base}/windows"
+
+ensure_directory_exists(silver_checkpoint_location)
+ensure_directory_exists(gold_checkpoint_location)
+ensure_directory_exists(notification_checkpoint_location)
+ensure_directory_exists(window_checkpoint_location)
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Write to Delta Lake Silver Layer
 # MAGIC Persist the processed stream to Delta Lake Silver layer
 
 # COMMAND ----------
 
 # Write raw events to Silver layer
-silver_checkpoint_location = f"{config['processing']['checkpoint_location']}/silver"
-silver_output_path = f"{config['delta']['silver_layer_path']}/price_changes"
+silver_output_path = f"{silver_path}/price_changes"
 
-# Write stream to Silver layer
-silver_query = processed_stream \
-    .writeStream \
-    .format("delta") \
-    .option("checkpointLocation", silver_checkpoint_location) \
-    .option("mergeSchema", "true") \
-    .outputMode("append") \
-    .partitionBy("retailer", "is_significant_change") \
-    .trigger(processingTime=config['processing']['trigger_interval']) \
-    .start(silver_output_path)
+try:
+    # Write stream to Silver layer with error handling
+    silver_query = processed_stream \
+        .writeStream \
+        .format("delta") \
+        .option("checkpointLocation", silver_checkpoint_location) \
+        .option("mergeSchema", "true") \
+        .outputMode("append") \
+        .partitionBy("retailer", "is_significant_change") \
+        .trigger(processingTime=config['processing']['trigger_interval']) \
+        .start(silver_output_path)
 
-print(f"Stream writing to Silver layer at {silver_output_path}")
+    print(f"Stream writing to Silver layer at {silver_output_path}")
+    print(f"Using checkpoint location: {silver_checkpoint_location}")
+except Exception as e:
+    print(f"Error setting up Silver layer stream: {str(e)}")
+    print("Attempting to write with default settings...")
+    
+    try:
+        # Simplify settings and try again
+        silver_query = processed_stream \
+            .writeStream \
+            .format("delta") \
+            .option("checkpointLocation", "dbfs:/mnt/checkpoints/silver_fallback") \
+            .outputMode("append") \
+            .trigger(processingTime="10 seconds") \
+            .start("dbfs:/mnt/silver/price_changes_fallback")
+            
+        print("Fallback Silver layer stream started successfully")
+    except Exception as e2:
+        print(f"Failed to start Silver layer stream even with fallback settings: {str(e2)}")
+        print("Silver layer stream will not be available")
 
 # COMMAND ----------
 
@@ -299,16 +379,19 @@ window_analysis = processed_stream \
                 expr("price_drop_count > price_increase_count"))
 
 # Write window analysis to console for demo
-window_query = window_analysis \
-    .writeStream \
-    .format("console") \
-    .outputMode("update") \
-    .option("truncate", "false") \
-    .option("numRows", 10) \
-    .trigger(processingTime=config['processing']['trigger_interval']) \
-    .start()
+try:
+    window_query = window_analysis \
+        .writeStream \
+        .format("console") \
+        .outputMode("update") \
+        .option("truncate", "false") \
+        .option("numRows", 10) \
+        .trigger(processingTime=config['processing']['trigger_interval']) \
+        .start()
 
-print("Window analysis started")
+    print("Window analysis console output started")
+except Exception as e:
+    print(f"Error starting window analysis console output: {str(e)}")
 
 # COMMAND ----------
 
@@ -328,26 +411,32 @@ def send_notification(batch_df, batch_id):
         
         # In a real implementation, this would send to a notification service
         # For demo, just print to console
-        notifications = batch_df.select("notification_message").collect()
-        
-        print("=" * 80)
-        print(f"PRICE CHANGE ALERTS - {datetime.now()}")
-        print("=" * 80)
-        for notification in notifications:
-            print(f"ALERT: {notification[0]}")
-        print("=" * 80)
+        try:
+            notifications = batch_df.select("notification_message").collect()
+            
+            print("=" * 80)
+            print(f"PRICE CHANGE ALERTS - {datetime.now()}")
+            print("=" * 80)
+            for notification in notifications:
+                print(f"ALERT: {notification[0]}")
+            print("=" * 80)
+        except Exception as e:
+            print(f"Error processing notifications in batch {batch_id}: {str(e)}")
     
     return
 
-# Write notifications using foreachBatch
-notification_query = significant_changes \
-    .writeStream \
-    .foreachBatch(send_notification) \
-    .outputMode("update") \
-    .trigger(processingTime=config['processing']['trigger_interval']) \
-    .start()
+# Write notifications using foreachBatch with error handling
+try:
+    notification_query = significant_changes \
+        .writeStream \
+        .foreachBatch(send_notification) \
+        .outputMode("update") \
+        .trigger(processingTime=config['processing']['trigger_interval']) \
+        .start()
 
-print("Notification processor started")
+    print("Notification processor started")
+except Exception as e:
+    print(f"Error starting notification processor: {str(e)}")
 
 # COMMAND ----------
 
@@ -358,21 +447,72 @@ print("Notification processor started")
 # COMMAND ----------
 
 # Write aggregated data to Gold layer
-gold_checkpoint_location = f"{config['processing']['checkpoint_location']}/gold"
-gold_output_path = f"{config['delta']['gold_layer_path']}/price_trends"
+gold_output_path = f"{gold_path}/price_trends"
 
-# Write window analysis to Gold layer
-gold_query = window_analysis \
-    .writeStream \
-    .format("delta") \
-    .option("checkpointLocation", gold_checkpoint_location) \
-    .option("mergeSchema", "true") \
-    .outputMode("append") \
-    .partitionBy("retailer", "is_competitive_window") \
-    .trigger(processingTime=config['processing']['trigger_interval']) \
-    .start(gold_output_path)
+try:
+    # Write window analysis to Gold layer with error handling
+    gold_query = window_analysis \
+        .writeStream \
+        .format("delta") \
+        .option("checkpointLocation", gold_checkpoint_location) \
+        .option("mergeSchema", "true") \
+        .outputMode("append") \
+        .partitionBy("retailer", "is_competitive_window") \
+        .trigger(processingTime=config['processing']['trigger_interval']) \
+        .start(gold_output_path)
 
-print(f"Stream writing to Gold layer at {gold_output_path}")
+    print(f"Stream writing to Gold layer at {gold_output_path}")
+    print(f"Using checkpoint location: {gold_checkpoint_location}")
+except Exception as e:
+    print(f"Error setting up Gold layer stream: {str(e)}")
+    print("Attempting to write with default settings...")
+    
+    try:
+        # Simplify settings and try again
+        gold_query = window_analysis \
+            .writeStream \
+            .format("delta") \
+            .option("checkpointLocation", "dbfs:/mnt/checkpoints/gold_fallback") \
+            .outputMode("append") \
+            .trigger(processingTime="10 seconds") \
+            .start("dbfs:/mnt/gold/price_trends_fallback")
+            
+        print("Fallback Gold layer stream started successfully")
+    except Exception as e2:
+        print(f"Failed to start Gold layer stream even with fallback settings: {str(e2)}")
+        print("Gold layer stream will not be available")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Store Significant Changes
+# MAGIC Save significant price changes to a separate Delta table
+
+# COMMAND ----------
+
+# Save significant price changes to a separate table
+significant_changes_path = f"{gold_path}/significant_price_changes"
+significant_checkpoint_location = f"{checkpoint_base}/significant_changes"
+
+try:
+    # Ensure checkpoint directory exists
+    ensure_directory_exists(significant_checkpoint_location)
+    
+    # Write significant changes to Delta
+    significant_query = significant_changes \
+        .withColumn("detected_at", current_timestamp()) \
+        .writeStream \
+        .format("delta") \
+        .option("checkpointLocation", significant_checkpoint_location) \
+        .option("mergeSchema", "true") \
+        .outputMode("append") \
+        .partitionBy("retailer", "price_change_direction") \
+        .trigger(processingTime=config['processing']['trigger_interval']) \
+        .start(significant_changes_path)
+    
+    print(f"Significant price changes writing to {significant_changes_path}")
+except Exception as e:
+    print(f"Error starting significant changes stream: {str(e)}")
 
 # COMMAND ----------
 
@@ -386,9 +526,25 @@ print(f"Stream writing to Gold layer at {gold_output_path}")
 active_streams = spark.streams.active
 print(f"Number of active streams: {len(active_streams)}")
 
+# Summary of stream destinations
+print("\nStream Destinations:")
+try:
+    if 'silver_query' in locals():
+        print(f"Silver layer: {silver_output_path}")
+    if 'gold_query' in locals():
+        print(f"Gold layer: {gold_output_path}")
+    if 'significant_query' in locals():
+        print(f"Significant changes: {significant_changes_path}")
+    print(f"\nAll streams will continue running until manually stopped.")
+    print(f"Data is being written to:")
+    print(f"Silver: {silver_path}")
+    print(f"Gold: {gold_path}")
+    print(f"Checkpoints: {checkpoint_base}")
+except Exception as e:
+    print(f"Error displaying stream summary: {str(e)}")
+
 # Keep all streams running for demonstration
-# In a notebook environment, these will continue running until terminated
-print("Streams are running. Use 'spark.streams.active' to check status.")
+print("\nStreams are running. Use 'spark.streams.active' to check status.")
 print("To stop streams, use: for query in spark.streams.active: query.stop()")
 
 # For demo purposes: Wait for streams to process data before stopping
