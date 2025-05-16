@@ -82,7 +82,6 @@ LOTUS-PRISM is an end-to-end data engineering solution that:
 1. **Price Analytics Components**
    - Develop price comparison algorithms
    - Create price sensitivity analysis by category
-   - Implement historical price trend analysis
 
 ### Phase 5: API Development
 
@@ -90,7 +89,6 @@ LOTUS-PRISM is an end-to-end data engineering solution that:
    - Set up Azure API Management
    - Create API endpoints for:
      - Price comparison data
-     - Promotion performance metrics
      - Product category analysis
    - Implement authentication and rate limiting
    - Create API documentation with Swagger/OpenAPI

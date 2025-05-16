@@ -1896,6 +1896,123 @@ function deploy_phase3() {
     return 0
 }
 
+# Function to install API dependencies
+function install_api_dependencies() {
+    echo -e "${YELLOW}Installing API dependencies...${NC}"
+    
+    # Check if virtual environment exists
+    if [ ! -d "venv" ]; then
+        echo -e "${YELLOW}Creating virtual environment...${NC}"
+        python3 -m venv venv
+    fi
+    
+    # Activate virtual environment
+    echo -e "${YELLOW}Activating virtual environment...${NC}"
+    source venv/bin/activate
+    
+    # Install API dependencies
+    echo -e "${YELLOW}Installing API requirements...${NC}"
+    pip install -r api/requirements.txt
+    
+    # Deactivate virtual environment
+    deactivate
+    
+    echo -e "${GREEN}API dependencies installed successfully.${NC}"
+    echo
+}
+
+# Function to set up API environment variables
+function setup_api_env() {
+    echo -e "${YELLOW}Setting up API environment variables...${NC}"
+    
+    # Check if .env file exists
+    if [ ! -f ".env" ]; then
+        echo -e "${RED}No .env file found. Please run option 1 or 9 to create it first.${NC}"
+        return 1
+    fi
+    
+    # Update .env file with API configurations
+    # Check if API_SECRET_KEY exists in .env
+    if ! grep -q "^API_SECRET_KEY=" ".env"; then
+        echo -e "${YELLOW}Adding API_SECRET_KEY to .env file...${NC}"
+        echo "API_SECRET_KEY=lotus-prism-secret-key" >> .env
+    fi
+    
+    # Check if API PORT exists in .env
+    if ! grep -q "^PORT=" ".env"; then
+        echo -e "${YELLOW}Adding PORT to .env file...${NC}"
+        echo "PORT=5000" >> .env
+    fi
+    
+    # Check if DEBUG exists in .env
+    if ! grep -q "^DEBUG=" ".env"; then
+        echo -e "${YELLOW}Adding DEBUG to .env file...${NC}"
+        echo "DEBUG=False" >> .env
+    fi
+    
+    # Check if RATE_LIMIT exists in .env
+    if ! grep -q "^RATE_LIMIT=" ".env"; then
+        echo -e "${YELLOW}Adding RATE_LIMIT to .env file...${NC}"
+        echo "RATE_LIMIT=100" >> .env
+    fi
+    
+    echo -e "${GREEN}API environment variables set up successfully.${NC}"
+    echo
+}
+
+# Function to run the API server
+function run_api_server() {
+    echo -e "${YELLOW}Starting API server...${NC}"
+    
+    # Install dependencies if needed
+    if ! command -v flask &> /dev/null; then
+        echo -e "${YELLOW}Flask not found. Installing API dependencies...${NC}"
+        install_api_dependencies
+    fi
+    
+    # Set up environment variables
+    setup_api_env
+    
+    # Activate virtual environment
+    echo -e "${YELLOW}Activating virtual environment...${NC}"
+    source venv/bin/activate
+    
+    # Run the API server
+    echo -e "${GREEN}API server starting at http://localhost:5000${NC}"
+    echo -e "${YELLOW}Press Ctrl+C to stop the server${NC}"
+    
+    # Run the API server in the foreground
+    cd api && python app.py
+    
+    # Deactivate virtual environment (this will only execute if the server is stopped)
+    deactivate
+    
+    echo -e "${GREEN}API server stopped.${NC}"
+    echo
+}
+
+# Function to deploy API to Azure
+function deploy_api_to_azure() {
+    echo -e "${YELLOW}Deploying API to Azure App Service...${NC}"
+    
+    # Check if the deployment script exists
+    if [ ! -f "api/deploy_azure.sh" ]; then
+        echo -e "${RED}Deployment script not found. Creating it...${NC}"
+        
+        # Make the script executable
+        chmod +x api/deploy_azure.sh
+    else
+        # Make sure script is executable
+        chmod +x api/deploy_azure.sh
+    fi
+    
+    # Execute the deployment script
+    cd api && ./deploy_azure.sh
+    
+    echo -e "${GREEN}Azure deployment script completed.${NC}"
+    echo
+}
+
 # Main menu
 function main_menu() {
     while true; do
@@ -1922,9 +2039,14 @@ function main_menu() {
         echo "15) Verify Phase 3 assets"
         echo "16) Install Python libraries to cluster"
         echo
+        echo "API - Interface:"
+        echo "17) Install API dependencies"
+        echo "18) Run API server"
+        echo "19) Deploy API to Azure App Service"
+        echo
         echo "0) Exit"
         
-        read -p "Choice [0-16]: " choice
+        read -p "Choice [0-19]: " choice
         
         case $choice in
             1)
@@ -1974,6 +2096,15 @@ function main_menu() {
                 ;;
             16)
                 install_databricks_libraries
+                ;;
+            17)
+                install_api_dependencies
+                ;;
+            18)
+                run_api_server
+                ;;
+            19)
+                deploy_api_to_azure
                 ;;
             0)
                 echo -e "${GREEN}Goodbye!${NC}"
